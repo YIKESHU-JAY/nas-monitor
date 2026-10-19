@@ -26,6 +26,20 @@ GitHub 工作流仅手动触发；上传源码不会自动构建 APK 或发布�
 
 > 截图为作者自建环境的演示数据，已移除拍摄设备信息；主机地址、渠道名等仅代表该演示环境。
 
+## 新功能展示
+
+| 下载器概览 | qBittorrent 任务 |
+| --- | --- |
+| ![下载器概览](docs/screenshots/08-下载器概览.jpg) | ![qBittorrent 任务](docs/screenshots/09-qBittorrent任务.jpg) |
+
+| 机场看板 | 代理概览 | 代理设置 |
+| --- | --- | --- |
+| ![机场看板](docs/screenshots/10-机场看板.jpg) | ![代理概览](docs/screenshots/11-代理概览.jpg) | ![代理设置](docs/screenshots/12-代理设置.jpg) |
+
+- **下载器**：统一查看 qBittorrent 与 Transmission 的下载/上传速度、任务状态、累计流量、错误数和磁盘空间，并进入单个下载器的任务列表。
+- **机场看板**：展示主代理与备代理双实例的连接数、订阅余量、已用比例和实时上下行趋势。
+- **Mihomo 代理**：查看实例版本、代理模式、连接与流量状态，管理订阅节点组并支持更新和测速。
+
 ## 包内结构
  
 - `backend/api_server.py`：Python 3.11 后端入口。

@@ -46,8 +46,8 @@
   },
   {
     "path": "CHANGELOG.md",
-    "size": 3791,
-    "sha256": "a1380a217daac9c6e3f6d136772f021da55480da1492bad26825eefc236e492d"
+    "size": 4106,
+    "sha256": "44076bdf8ba7784cc837a75ee764095796d636f85d61762bd8128fb9801c2888"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -506,13 +506,13 @@
   },
   {
     "path": "README.en.md",
-    "size": 7074,
-    "sha256": "441cdfa67baa20ed0b0079608fec9133976542e819659254cd831fac8ce5d687"
+    "size": 8003,
+    "sha256": "af2bd77170dc3c9767b4de708a86d056a438f03b2c09e69a5d66d7eef3c8a269"
   },
   {
     "path": "README.md",
-    "size": 6012,
-    "sha256": "761b2ebc2f266afc031dedca49779af206b1cf5037f767624eb1328110972820"
+    "size": 6901,
+    "sha256": "eb96b2b45c00befc0c94d80f576a847c8138f46f68adc1cfa0f5066d5f2f62c1"
   },
   {
     "path": "backend/.dockerignore",
@@ -788,6 +788,31 @@
     "path": "docs/screenshots/07-NAS详情.jpg",
     "size": 127391,
     "sha256": "4aa247e9df125392d85c86b6694520f0f7bf4e1e585a7dada4badd949dc56000"
+  },
+  {
+    "path": "docs/screenshots/08-下载器概览.jpg",
+    "size": 158333,
+    "sha256": "055daf680cb76d521bf4d6b379cd2b1910fcf4a5095608d99e20c8fc84e485f9"
+  },
+  {
+    "path": "docs/screenshots/09-qBittorrent任务.jpg",
+    "size": 124056,
+    "sha256": "1964b79c0c1a2f1db6f25f30a6e9ae60c168df43064fcb600750916999decd87"
+  },
+  {
+    "path": "docs/screenshots/10-机场看板.jpg",
+    "size": 181859,
+    "sha256": "ba1b4cf4ca6486a3f203029724401537d5f2848bc1b41f3d6bd371639f7f8c4a"
+  },
+  {
+    "path": "docs/screenshots/11-代理概览.jpg",
+    "size": 219479,
+    "sha256": "67db9404a2df4acbe991ade6cce78ebff72e95a81c4b81492aceadc04108a39c"
+  },
+  {
+    "path": "docs/screenshots/12-代理设置.jpg",
+    "size": 214668,
+    "sha256": "22c1faab89cf2e68527ca3d08bdc56c4918dbac831b6b91341bd03492093257d"
   },
   {
     "path": "docs/源码交付审查报告.md",

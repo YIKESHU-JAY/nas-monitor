@@ -26,6 +26,20 @@ GitHub workflows are **manual-trigger only**; pushing source will not build an A
 
 > Screenshots show the author's own demo environment with device metadata removed. Host addresses, channel names, and figures describe that demo only.
 
+## New Features
+
+| Downloaders | qBittorrent tasks |
+| --- | --- |
+| ![Downloaders](docs/screenshots/08-下载器概览.jpg) | ![qBittorrent tasks](docs/screenshots/09-qBittorrent任务.jpg) |
+
+| Airport dashboard | Proxy overview | Proxy settings |
+| --- | --- | --- |
+| ![Airport dashboard](docs/screenshots/10-机场看板.jpg) | ![Proxy overview](docs/screenshots/11-代理概览.jpg) | ![Proxy settings](docs/screenshots/12-代理设置.jpg) |
+
+- **Downloaders**: inspect qBittorrent and Transmission speeds, task status, cumulative traffic, error counts, and disk space, then open an individual downloader's task list.
+- **Airport dashboard**: compare primary and standby proxy instances, connection counts, subscription balances, usage ratios, and live traffic trends.
+- **Mihomo proxy**: view instance version, proxy mode, connection and traffic state, and manage subscription groups with update and speed-test actions.
+
 ## Repository layout
 
 - `backend/api_server.py` — Python 3.11 backend entry point.
