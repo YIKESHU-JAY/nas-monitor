@@ -143,8 +143,9 @@ def collect() -> dict:
     task_items, task_checked = _task_items()
     if not model_items:
         raise RuntimeError("Pipio uptime shadow 尚未生成，保留上一份聚合探针")
-    if not task_items:
-        raise RuntimeError("Cron registry shadow 尚未生成，保留上一份聚合探针")
+    # Cron 注册表来自 Hermes（trim.hermes），属可选数据源：
+    # Hermes 掉线或 /vol6 异常时只隐藏任务项并标记该来源不可用，不阻断 Pipio 探针。
+    cron_available = bool(task_items)
 
     now = datetime.now(SHANGHAI)
     checked_at = now.isoformat()
@@ -206,9 +207,9 @@ def collect() -> dict:
             "error": "数据源已过期" if model_stale else "",
         },
         "cron-registry": {
-            "status": "failed" if task_stale else "ok",
+            "status": "unavailable" if not cron_available else ("failed" if task_stale else "ok"),
             "checked_at": task_checked or checked_at,
-            "error": "数据源已过期" if task_stale else "",
+            "error": "未配置（可选数据源）" if not cron_available else ("数据源已过期" if task_stale else ""),
             "task_count": len(task_items),
         },
     }

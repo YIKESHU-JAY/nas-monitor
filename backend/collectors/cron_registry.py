@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 from .shadow_store import atomic_write_json
 
-JOBS_FILE = os.environ.get("HERMES_JOBS_FILE", "/app/secrets/hermes-jobs.json")
+# 支持目录挂载（新，默认）与整文件挂载（旧）；指向目录时取其中的 jobs.json。
+JOBS_FILE = os.environ.get("HERMES_JOBS_FILE", "/app/secrets/hermes/jobs.json")
 SHANGHAI = timezone(timedelta(hours=8))
 
 # Codex 主号池监控已按用户要求下线：采集层直接排除，避免残留在任何探针输出中。
@@ -38,8 +39,9 @@ def _is_excluded(job):
 
 
 def collect() -> dict:
+    jobs_file = os.path.join(JOBS_FILE, "jobs.json") if os.path.isdir(JOBS_FILE) else JOBS_FILE
     try:
-        with open(JOBS_FILE, encoding="utf-8") as stream:
+        with open(jobs_file, encoding="utf-8") as stream:
             payload = json.load(stream)
         if not isinstance(payload, dict):
             raise ValueError("jobs 文件顶层不是对象")

@@ -34,6 +34,23 @@ import io.github.nasmonitor.app.*
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
 
+data class TrendGap(val startFraction: Float, val endFraction: Float)
+
+internal fun trendGaps(times: List<Double>, thresholdSeconds: Double): List<TrendGap> {
+    if (times.size < 2) return emptyList()
+    val span = times.last() - times.first()
+    if (span <= 0) return emptyList()
+    return times.zipWithNext().mapNotNull { (start, end) ->
+        val delta = end - start
+        if (delta > thresholdSeconds) {
+            TrendGap(
+                startFraction = ((start - times.first()) / span).toFloat().coerceIn(0f, 1f),
+                endFraction = ((end - times.first()) / span).toFloat().coerceIn(0f, 1f)
+            )
+        } else null
+    }
+}
+
 internal fun chartNiceMaxY(rawMaxY: Float): Float {
     val value = rawMaxY.coerceAtLeast(1f)
     return when {
@@ -57,8 +74,20 @@ data class ContainerLogResponse(val name: String, val lines: Int, val logs: Stri
 
 // ── 趋势图组件 ──
 @Composable
-fun TrendLine(values: List<Float>, color: Color, label: String, unit: String, maxY: Float = 100f, modifier: Modifier = Modifier) {
+fun TrendLine(
+    values: List<Float>,
+    color: Color,
+    label: String,
+    unit: String,
+    maxY: Float = 100f,
+    times: List<Double> = emptyList(),
+    modifier: Modifier = Modifier
+) {
     if (values.isEmpty()) return
+    val usableTimes = times.takeIf { it.size == values.size && it.zipWithNext().all { (a, b) -> b >= a } }
+    val intervals = usableTimes?.zipWithNext()?.map { (a, b) -> b - a }?.filter { it > 0 }.orEmpty()
+    val expectedInterval = intervals.sorted().getOrNull(intervals.size / 2) ?: 0.0
+    val gaps = if (usableTimes != null && expectedInterval > 0) trendGaps(usableTimes, expectedInterval * 2.5) else emptyList()
     // 曲线平滑动画
     val animatedVals = values.mapIndexed { i, v ->
         animateFloatAsState(
@@ -93,20 +122,44 @@ fun TrendLine(values: List<Float>, color: Color, label: String, unit: String, ma
                         val y = h - (yv / yRange * h).coerceIn(0f, h)
                         drawLine(ChartGrid, Offset(0f, y), Offset(w, y), strokeWidth = 0.5f)
                     }
+                    val gapBands = gaps
+                    gapBands.forEach { gap ->
+                        val startX = gap.startFraction * w
+                        val endX = gap.endFraction * w
+                        drawRect(color = Amber.copy(alpha = 0.07f), topLeft = Offset(startX, 0f), size = androidx.compose.ui.geometry.Size((endX - startX).coerceAtLeast(2f), h))
+                    }
                     // 数据曲线
                     if (animatedVals.size >= 2) {
-                        val stepX = w / (animatedVals.size - 1)
                         val path = Path()
+                        var lastX: Float? = null
                         animatedVals.forEachIndexed { i, v ->
-                            val x = i * stepX
+                            val x = if (usableTimes != null) {
+                                val span = usableTimes.last() - usableTimes.first()
+                                if (span > 0) ((usableTimes[i] - usableTimes.first()) / span * w).toFloat() else i.toFloat() / (animatedVals.size - 1) * w
+                            } else i.toFloat() / (animatedVals.size - 1) * w
                             val y = h - (v / yRange * h).coerceIn(0f, h)
-                            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                            val broken = usableTimes != null && i > 0 && gaps.any { gap ->
+                                val gapStart = gap.startFraction * w
+                                val gapEnd = gap.endFraction * w
+                                val previousX = lastX ?: x
+                                previousX <= gapStart && x >= gapEnd || previousX < gapStart && x > gapStart
+                            }
+                            if (i == 0 || broken) path.moveTo(x, y) else path.lineTo(x, y)
+                            lastX = x
                         }
                         drawPath(path, color, style = Stroke(2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
-                        val fill = Path().apply { addPath(path); lineTo((animatedVals.size - 1) * stepX, h); lineTo(0f, h); close() }
-                        drawPath(fill, color.copy(alpha = 0.08f))
+                    }
+                    gapBands.forEach { gap ->
+                        if (gap.endFraction > gap.startFraction) {
+                            drawLine(Amber.copy(alpha = 0.35f), Offset(gap.startFraction * w, 0f), Offset(gap.startFraction * w, h), strokeWidth = 1f)
+                            drawLine(Amber.copy(alpha = 0.35f), Offset(gap.endFraction * w, 0f), Offset(gap.endFraction * w, h), strokeWidth = 1f)
+                        }
                     }
                 }
+            }
+            if (gaps.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text("琥珀色区间为数据空档，曲线在空档处断开。", fontSize = 10.sp, color = Amber)
             }
         }
     }
@@ -158,16 +211,17 @@ fun TrendsScreen(host: String, onBack: () -> Unit) {
                 }
                 else -> {
                     val pts = data!!.points
+                    val times = pts.map { it.t }
                     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 12.dp)) {
                         item { Text("CPU 使用率", fontSize = 13.sp, color = Muted) }
-                        item { TrendLine(pts.map { it.cpu }, Blue, "CPU", "%", maxY = 100f) }
+                        item { TrendLine(pts.map { it.cpu }, Blue, "CPU", "%", maxY = 100f, times = times) }
                         item { Text("内存使用率", fontSize = 13.sp, color = Muted) }
-                        item { TrendLine(pts.map { it.mem }, Green, "内存", "%", maxY = 100f) }
+                        item { TrendLine(pts.map { it.mem }, Green, "内存", "%", maxY = 100f, times = times) }
                         item { Text("磁盘占用", fontSize = 13.sp, color = Muted) }
-                        item { TrendLine(pts.map { it.disk }, Amber, "磁盘", "%", maxY = 100f) }
+                        item { TrendLine(pts.map { it.disk }, Amber, "磁盘", "%", maxY = 100f, times = times) }
                         item { Text("网络流量", fontSize = 13.sp, color = Muted) }
-                        val maxTraffic = (pts.maxOfOrNull { (it.rx / 1024).coerceAtLeast(it.tx / 1024) } ?: 1f) * 1.3f; item { TrendLine(pts.map { it.rx / 1024 }, Amber, "下载", "KB/s", maxY = maxTraffic) }
-                        item { TrendLine(pts.map { it.tx / 1024 }, Blue, "上传", "KB/s", maxY = maxTraffic) }
+                        val maxTraffic = (pts.maxOfOrNull { (it.rx / 1024).coerceAtLeast(it.tx / 1024) } ?: 1f) * 1.3f; item { TrendLine(pts.map { it.rx / 1024 }, Amber, "下载", "KB/s", maxY = maxTraffic, times = times) }
+                        item { TrendLine(pts.map { it.tx / 1024 }, Blue, "上传", "KB/s", maxY = maxTraffic, times = times) }
                     }
                 }
             }
@@ -260,6 +314,9 @@ fun ContainersScreen(host: String, onBack: () -> Unit) {
     var logError by remember { mutableStateOf<String?>(null) }
     var logJob by remember { mutableStateOf<Job?>(null) }
     var logRequest by remember { mutableIntStateOf(0) }
+    var pendingAction by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var actionBusy by remember { mutableStateOf(false) }
+    var actionMessage by remember { mutableStateOf<String?>(null) }
     fun load() {
         if (loading) return
         loading = true
@@ -282,6 +339,30 @@ fun ContainersScreen(host: String, onBack: () -> Unit) {
             try { val content = ApiClient.getContainerLog(host, name); if (request == logRequest) logContent = content }
             catch (e: Exception) { if (e is CancellationException) throw e; if (request == logRequest) logError = e.message ?: "加载失败" }
             finally { if (request == logRequest) logLoading = false }
+        }
+    }
+    fun runAction(name: String, action: String) {
+        if (actionBusy) return
+        pendingAction = null
+        actionBusy = true
+        actionMessage = null
+        scope.launch {
+            try {
+                val refreshed = ApiClient.containerAction(host, name, action)
+                if (refreshed.error != null) {
+                    actionMessage = "$name ${when (action) { "start" -> "已启动"; "stop" -> "已停止"; else -> "已重启" }}，但列表刷新失败：${refreshed.error}"
+                } else {
+                    containers = refreshed.containers
+                    actionMessage = "$name ${when (action) { "start" -> "已启动"; "stop" -> "已停止"; else -> "已重启" }}"
+                }
+                loaded = true
+                error = null
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                actionMessage = "操作失败：${e.message ?: "未知错误"}"
+            } finally {
+                actionBusy = false
+            }
         }
     }
     BackHandler(enabled = logName != null) { closeLog() }
@@ -318,6 +399,10 @@ fun ContainersScreen(host: String, onBack: () -> Unit) {
             RefreshContainer(loading, { load() }, Modifier.padding(pad)) {
                 LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(vertical = 12.dp)) {
                     if (host != "nas") item { Text("当前主机仅提供容器清单，暂不支持读取日志。", color = Muted, fontSize = 12.sp) }
+                    if (host == "nas") item {
+                        Text("仅支持 NAS 本机容器的启动、停止与重启；危险操作需二次确认。", color = Muted, fontSize = 12.sp)
+                    }
+                    actionMessage?.let { message -> item { LoadFeedback(message) } }
                     if (loading && !loaded) item { LoadFeedback("正在加载容器…") }
                     if (error != null) item { LoadFeedback(if (loaded) "刷新失败，显示上次数据：$error · 下拉重试" else "加载失败：$error · 下拉重试") }
                     if (loaded) {
@@ -375,7 +460,17 @@ fun ContainersScreen(host: String, onBack: () -> Unit) {
                                     Spacer(Modifier.height(8.dp))
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                                         Text(c.status, fontSize = 11.sp, color = Subtle)
-                                        if (host == "nas") TextButton(onClick = { loadLog(c.name) }) { Text("查看日志", color = Blue, fontSize = 12.sp) }
+                                        if (host == "nas") {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                if (!runningNow) {
+                                                    TextButton(enabled = !actionBusy, onClick = { pendingAction = c.name to "start" }) { Text("启动", color = Green, fontSize = 12.sp) }
+                                                } else {
+                                                    TextButton(enabled = !actionBusy, onClick = { pendingAction = c.name to "restart" }) { Text("重启", color = Amber, fontSize = 12.sp) }
+                                                    TextButton(enabled = !actionBusy, onClick = { pendingAction = c.name to "stop" }) { Text("停止", color = Red, fontSize = 12.sp) }
+                                                }
+                                                TextButton(onClick = { loadLog(c.name) }) { Text("日志", color = Blue, fontSize = 12.sp) }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -384,6 +479,20 @@ fun ContainersScreen(host: String, onBack: () -> Unit) {
                 }
             }
         }
+    }
+    pendingAction?.let { (name, action) ->
+        val actionLabel = when (action) { "start" -> "启动"; "stop" -> "停止"; else -> "重启" }
+        AlertDialog(
+            onDismissRequest = { if (!actionBusy) pendingAction = null },
+            title = { Text("${actionLabel}容器") },
+            text = { Text("确认${actionLabel}容器 $name？操作会中断该容器的当前连接。") },
+            confirmButton = {
+                TextButton(enabled = !actionBusy, onClick = { runAction(name, action) }) {
+                    Text(if (actionBusy) "处理中…" else actionLabel, color = if (action == "stop") Red else Blue)
+                }
+            },
+            dismissButton = { TextButton(enabled = !actionBusy, onClick = { pendingAction = null }) { Text("取消") } }
+        )
     }
 }
 

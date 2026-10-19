@@ -39,7 +39,7 @@ body:
     attributes:
       label: 版本
       description: App 版本号，或仓库 commit（`git rev-parse --short HEAD`）
-      placeholder: "例如 v214 / 32d2bbc"
+      placeholder: "例如 v236 / 提交哈希"
     validations:
       required: true
   - type: textarea

@@ -16,8 +16,10 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -35,8 +37,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.semantics.Role
@@ -45,10 +50,18 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.navigation.NavHostController
 import io.github.nasmonitor.app.*
+import io.github.nasmonitor.app.data.DownloaderApis
+import io.github.nasmonitor.app.data.DownloaderServer
+import io.github.nasmonitor.app.data.DownloaderSession
+import io.github.nasmonitor.app.data.DownloaderStats
+import io.github.nasmonitor.app.data.TransmissionClient
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 @Composable
 fun Gauge(value: Double, label: String, modifier: Modifier = Modifier) {
@@ -75,7 +88,13 @@ private fun compactUptime(raw: String): String {
 }
 
 @Composable
-fun ServerHeader(name: String, meshIp: String, uptime: String, online: Boolean) {
+fun ServerHeader(
+    name: String,
+    meshIp: String,
+    uptime: String,
+    online: Boolean,
+    reorder: ReorderControls? = null
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         ServerIllustration(height = 42)
         Spacer(Modifier.width(12.dp))
@@ -88,7 +107,30 @@ fun ServerHeader(name: String, meshIp: String, uptime: String, online: Boolean) 
             Spacer(Modifier.height(2.dp))
             Text("组网 IP：$meshIp", fontSize = TextCaption, color = Muted, maxLines = 1)
         }
-        Text(compactUptime(uptime), fontSize = 11.sp, color = Subtle)
+        if (reorder != null) {
+            ReorderButtons(reorder)
+        } else {
+            Text(compactUptime(uptime), fontSize = 11.sp, color = Subtle)
+        }
+    }
+}
+
+data class ReorderControls(
+    val canMoveUp: Boolean,
+    val canMoveDown: Boolean,
+    val onMoveUp: () -> Unit,
+    val onMoveDown: () -> Unit
+)
+
+@Composable
+private fun ReorderButtons(controls: ReorderControls) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = controls.onMoveUp, enabled = controls.canMoveUp, modifier = Modifier.size(34.dp)) {
+            Icon(Icons.Default.KeyboardArrowUp, "上移", tint = if (controls.canMoveUp) Blue else Subtle, modifier = Modifier.size(22.dp))
+        }
+        IconButton(onClick = controls.onMoveDown, enabled = controls.canMoveDown, modifier = Modifier.size(34.dp)) {
+            Icon(Icons.Default.KeyboardArrowDown, "下移", tint = if (controls.canMoveDown) Blue else Subtle, modifier = Modifier.size(22.dp))
+        }
     }
 }
 
@@ -148,25 +190,28 @@ private fun UsageMetricTile(label: String, value: Double, modifier: Modifier = M
 @Composable
 private fun NetworkMetricTile(upload: String, download: String, modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier.clip(RoundedCornerShape(12.dp)).background(CardTint).padding(10.dp)
+        modifier = modifier.height(IntrinsicSize.Min).clip(RoundedCornerShape(12.dp)).background(CardTint).padding(10.dp)
     ) {
         Text("网络", fontSize = TextTiny, color = Muted)
         Spacer(Modifier.height(4.dp))
         NetworkRateLine("↓", download)
         Spacer(Modifier.height(3.dp))
         NetworkRateLine("↑", upload)
+        Spacer(Modifier.weight(1f))
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun NetworkRateLine(direction: String, rate: String) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text("$direction ${rate.substringBeforeLast(' ', rate)}", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-        if (' ' in rate) {
-            Text(rate.substringAfterLast(' '), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink, softWrap = false)
-        }
-    }
+    Text(
+        "$direction ${compactRate(rate)}",
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = Ink,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Ellipsis
+    )
 }
 
 @Composable
@@ -176,16 +221,38 @@ fun QuickAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: St
     }
 }
 
-private fun formatRateShort(bytesPerSecond: Double): String = when {
+internal fun formatRateShort(bytesPerSecond: Double): String = when {
     bytesPerSecond >= 1024.0 * 1024 -> String.format("%.1f MB", bytesPerSecond / 1024 / 1024)
     bytesPerSecond >= 1024.0 -> String.format("%.0f KB", bytesPerSecond / 1024)
     else -> String.format("%.0f B", bytesPerSecond)
 }
 
+private fun speedLimitLabel(bytesPerSecond: Long): String =
+    if (bytesPerSecond <= 0) "不限速" else TransmissionClient.formatSpeed(bytesPerSecond)
+
 fun formatRate(bytesPerSecond: Double): String = when {
     bytesPerSecond >= 1024 * 1024 -> "%.1f MB/s".format(bytesPerSecond / 1024 / 1024)
     bytesPerSecond >= 1024 -> "%.1f KB/s".format(bytesPerSecond / 1024)
     else -> "%.0f B/s".format(bytesPerSecond)
+}
+
+private fun compactRate(rate: String): String {
+    val parts = rate.trim().split(" ")
+    if (parts.size != 2) return rate
+    val value = parts[0].toDoubleOrNull() ?: return rate
+    val unit = when (parts[1]) {
+        "KB/s" -> "K/s"
+        "MB/s" -> "M/s"
+        "GB/s" -> "G/s"
+        "B/s" -> "B/s"
+        else -> return rate
+    }
+    val formatted = when {
+        unit == "B/s" -> "%.0f".format(value)
+        value >= 100 -> "%.0f".format(value)
+        else -> "%.1f".format(value)
+    }
+    return "$formatted$unit"
 }
 
 internal fun airportUsedProgress(usedPercent: Double): Float = (usedPercent.coerceAtLeast(0.0) / 100.0).toFloat().coerceIn(0f, 1f)
@@ -215,12 +282,32 @@ fun CoreServicesRow(services: Map<String, ServiceStatus>, expanded: Boolean, onT
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ServerCard(name: String, meshIp: String, uptime: String, cpu: Double, memory: Double, upload: String, download: String, online: Boolean, coreServices: Map<String, ServiceStatus>, publicIp: String? = null, supportsLogs: Boolean = false, onClick: () -> Unit, onTrends: () -> Unit = {}, onContainers: () -> Unit = {}, onServices: () -> Unit = {}) {
+fun ServerCard(
+    name: String,
+    meshIp: String,
+    uptime: String,
+    cpu: Double,
+    memory: Double,
+    upload: String,
+    download: String,
+    online: Boolean,
+    coreServices: Map<String, ServiceStatus>,
+    publicIp: String? = null,
+    supportsLogs: Boolean = false,
+    reorder: ReorderControls? = null,
+    forceExpanded: Boolean = false,
+    onClick: () -> Unit,
+    onTrends: () -> Unit = {},
+    onContainers: () -> Unit = {},
+    onServices: () -> Unit = {}
+) {
     var expanded by remember { mutableStateOf(false) }
+    val showAllMetrics = forceExpanded || expanded
     FrostCard(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
         Column {
-            ServerHeader(name, meshIp, uptime, online)
+            ServerHeader(name, meshIp, uptime, online, reorder)
             Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 UsageMetricTile("CPU", cpu, Modifier.weight(1f))
@@ -228,14 +315,17 @@ fun ServerCard(name: String, meshIp: String, uptime: String, cpu: Double, memory
                 NetworkMetricTile(upload, download, Modifier.weight(1f))
             }
             Spacer(Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            FlowRow(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 if (!publicIp.isNullOrBlank()) {
                     PublicIpInline(name, publicIp)
                 }
-                Spacer(Modifier.weight(1f))
                 CoreServicesRow(coreServices, expanded, onToggle = { expanded = !expanded })
             }
-            if (expanded) {
+            if (showAllMetrics && !forceExpanded) {
                 Spacer(Modifier.height(10.dp)); Divider(color = Track); Spacer(Modifier.height(8.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     QuickAction(Icons.Default.KeyboardArrowUp, "趋势", onTrends); QuickAction(Icons.Default.List, if (supportsLogs) "容器与日志" else "容器", onContainers); QuickAction(Icons.Default.Favorite, "服务", onServices); QuickAction(Icons.Default.ArrowForward, "详情", onClick)
@@ -333,6 +423,64 @@ fun AirportTrafficCard(items: List<AirportTrafficItem>) {
 }
 
 @Composable
+fun AirportBoardCard(mihomo: MihomoAirportsResponse) {
+    FrostCard {
+        Column(Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Build, null, tint = Blue, modifier = Modifier.size(19.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("机场看板", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Ink)
+                Spacer(Modifier.weight(1f))
+                Text("双实例实时", fontSize = 10.sp, color = Subtle)
+            }
+            Spacer(Modifier.height(10.dp))
+            mihomo.instances.forEachIndexed { instanceIndex, instance ->
+                Text(instance.name, color = Muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                if (instance.items.isEmpty()) {
+                    Text(instance.error ?: "暂无机场数据", color = Subtle, fontSize = 11.sp)
+                } else {
+                    instance.items.forEachIndexed { index, item ->
+                        val usedPercent = item.usedPercent.coerceAtLeast(0.0)
+                        val color = when (item.level) { "critical" -> Red; "warning" -> Amber; else -> Green }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(item.name, fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
+                            Text("${item.connections} 连接", fontSize = 10.sp, color = Blue)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = (usedPercent / 100.0).toFloat().coerceIn(0f, 1f),
+                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(6.dp)),
+                            color = color, trackColor = Track
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("剩余 ${"%.1f".format(item.remainingGb)} / ${"%.0f".format(item.totalGb)} GB", fontSize = 11.sp, color = color, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.weight(1f))
+                            Text("已用 ${"%.0f".format(usedPercent)}%", fontSize = 10.sp, color = Subtle)
+                        }
+                        if (index != instance.items.lastIndex) Spacer(Modifier.height(2.dp))
+                    }
+                    val latest = instance.history.lastOrNull()
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("↓ ${formatRateShort(latest?.down?.toDouble() ?: 0.0)}", fontSize = 10.sp, color = Green)
+                        Text("↑ ${formatRateShort(latest?.up?.toDouble() ?: 0.0)}", fontSize = 10.sp, color = Amber)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    MihomoTrafficChart(instance.history, Modifier.fillMaxWidth().height(36.dp))
+                }
+                if (instanceIndex != mihomo.instances.lastIndex) {
+                    Spacer(Modifier.height(8.dp))
+                    Divider(color = Track, thickness = 0.7.dp)
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun OverviewStatusSummary(overview: OverviewResponse) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val alertSignature = overview.alerts.sortedWith(compareBy<AlertItem> { it.host }.thenBy { it.kind }.thenBy { it.message }.thenBy { it.firstSeen ?: "" })
@@ -411,17 +559,34 @@ private fun overviewFailureText(error: Exception, hasCachedData: Boolean): Strin
 @Composable
 fun OverviewScreen(navController: NavHostController) {
     val managedServers by ServerRegistry.servers.collectAsState()
+    val downloaders by DownloaderStore.servers.collectAsState()
+    val credentialEpoch by DownloaderStore.credentialEpoch.collectAsState()
+    val cardOrder by CardOrderStore.keys.collectAsState()
+    val serverListStyle = DisplayPreferences.serverListStyle
     var overview by remember { mutableStateOf<OverviewResponse?>(null) }
     var airportTraffic by remember { mutableStateOf<AirportTrafficResponse?>(null) }
+    var mihomoAirports by remember { mutableStateOf<MihomoAirportsResponse?>(null) }
     var airportError by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     var refreshMode by remember { mutableStateOf(PreferenceHelper.getRefreshInterval(context)) }
     var loading by remember { mutableStateOf(false) }
     var pullRefreshing by remember { mutableStateOf(false) }
+    var sortMode by rememberSaveable { mutableStateOf(false) }
+    var downloaderSessions by remember { mutableStateOf<Map<String, DownloaderSession>>(emptyMap()) }
+    var downloaderStats by remember { mutableStateOf<Map<String, DownloaderStats>>(emptyMap()) }
+    var downloaderFailed by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var downloaderLoading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    fun load() { scope.launch {
-        if (loading) return@launch
+    val overviewLoadMutex = remember { Mutex() }
+    val downloaderLoadMutex = remember { Mutex() }
+    // 单调递增的刷新票据：排队期间若有更新的刷新，旧票据直接跳过，避免慢网络下队列无限增长。
+    val overviewRefreshSeq = remember { java.util.concurrent.atomic.AtomicLong(0) }
+    val downloaderRefreshSeq = remember { java.util.concurrent.atomic.AtomicLong(0) }
+    suspend fun load() {
+        val ticket = overviewRefreshSeq.incrementAndGet()
+        overviewLoadMutex.withLock {
+        if (ticket < overviewRefreshSeq.get()) return@withLock
         loading = true
         try {
             // 进程内缓存优先；冷启动时使用上次成功快照，避免网络采集期间白屏。
@@ -438,7 +603,7 @@ fun OverviewScreen(navController: NavHostController) {
                 DataCache.set("overview", fresh)
                 StartupOverviewCache.save(context, fresh)
                 try {
-                    airportTraffic = ApiClient.getAirportTraffic()
+                    mihomoAirports = ApiClient.getMihomoAirports()
                     airportError = null
                 } catch (e: CancellationException) {
                     throw e
@@ -452,41 +617,463 @@ fun OverviewScreen(navController: NavHostController) {
                 if (overview == null) error = overviewFailureText(e, hasCachedData = false)
                 else error = overviewFailureText(e, hasCachedData = true)
             }
-        } finally { loading = false; pullRefreshing = false }
-    } }
+        } finally {
+            loading = false
+        }
+        }
+    }
+    suspend fun loadDownloaders(servers: List<DownloaderServer>) {
+        val ticket = downloaderRefreshSeq.incrementAndGet()
+        downloaderLoadMutex.withLock {
+            // 已有更新的下载器刷新在排队时跳过本次。
+            if (ticket < downloaderRefreshSeq.get()) return@withLock
+            if (servers.isEmpty()) {
+                downloaderSessions = emptyMap()
+                downloaderStats = emptyMap()
+                downloaderFailed = emptySet()
+                return@withLock
+            }
+            downloaderLoading = true
+            try {
+                val sessions = mutableMapOf<String, DownloaderSession>()
+                val stats = mutableMapOf<String, DownloaderStats>()
+                val failures = mutableSetOf<String>()
+                coroutineScope {
+                    servers.forEach { server ->
+                        val api = DownloaderApis.of(server)
+                        // 会话与统计任一失败即视为该下载器本次不可用，避免卡片同时显示“连接失败”和旧速度。
+                        launch {
+                            try {
+                                val session = api.session(server)
+                                val stat = api.stats(server)
+                                sessions[server.id] = session
+                                stats[server.id] = stat
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                failures += server.id
+                            }
+                        }
+                    }
+                }
+                // 请求期间下载器配置可能已变化；只写回与当前连接配置完全一致的这一代结果。
+                fun fingerprint(item: DownloaderServer) = listOf(
+                    item.id, item.host, item.port.toString(), item.username,
+                    item.useHttps.toString(), item.allowInsecure.toString(),
+                    item.rpcPath, item.protocol.name
+                ).joinToString("|")
+                val current = DownloaderStore.servers.value.map(::fingerprint).toSet()
+                if (current == servers.map(::fingerprint).toSet()) {
+                    downloaderSessions = sessions
+                    downloaderStats = stats
+                    downloaderFailed = failures
+                }
+            } finally {
+                downloaderLoading = false
+            }
+        }
+    }
     LaunchedEffect(Unit) { load() }
-    LaunchedEffect(Unit) {
-        while (isActive) {
-            refreshMode = PreferenceHelper.getRefreshInterval(context)
-            val wait = if (refreshMode > 0) refreshMode else 5
-            delay(wait * 1000L)
-            if (refreshMode > 0) load()
+    LaunchedEffect(downloaders, credentialEpoch) { loadDownloaders(downloaders) }
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    LaunchedEffect(downloaders, credentialEpoch, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (isActive) {
+                refreshMode = PreferenceHelper.getRefreshInterval(context)
+                val wait = if (refreshMode > 0) refreshMode else 5
+                delay(wait * 1000L)
+                if (refreshMode > 0) {
+                    load()
+                    loadDownloaders(downloaders)
+                }
+            }
         }
     }
 
-    Scaffold(containerColor = PageBackground, topBar = {
-        AppPageHeader("服务器") { TextButton(onClick = { navController.navigate("servers") }) { Text("管理") } }
-    }) { pad ->
-        RefreshContainer(pullRefreshing, { if (!loading) { pullRefreshing = true; load() } }, Modifier.padding(pad)) {
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp + LocalFloatingNavigationPadding.current)) {
+    val metrics = overview?.serverEntries().orEmpty().associateBy { it.id }
+    data class CardEntry(val key: String, val server: ManagedServer?, val downloader: DownloaderServer?)
+    val entries = buildList {
+        managedServers.forEach { add(CardEntry("server:${it.id}", it, null)) }
+        downloaders.forEach { add(CardEntry("downloader:${it.id}", null, it)) }
+    }
+    val orderedEntries = CardOrderStore.apply(entries, cardOrder) { it.key }
+    LaunchedEffect(managedServers, downloaders, cardOrder) {
+        CardOrderStore.retain(entries.map { it.key }.toSet())
+    }
+    fun moveEntry(index: Int, delta: Int) {
+        val keys = orderedEntries.map { it.key }
+        val target = index + delta
+        if (index !in keys.indices || target !in keys.indices) return
+        CardOrderStore.saveOrder(CardOrderStore.move(keys, index, target))
+    }
+
+    Scaffold(
+        containerColor = PageBackground,
+        topBar = {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { sortMode = !sortMode }) {
+                    Icon(
+                        if (sortMode) Icons.Default.Check else Icons.Default.SwapVert,
+                        null,
+                        tint = if (sortMode) Blue else Muted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (sortMode) "完成" else "排序", fontSize = 12.sp, color = if (sortMode) Blue else Muted)
+                }
+            }
+        }
+    ) { pad ->
+        RefreshContainer(pullRefreshing, {
+            if (!pullRefreshing) {
+                pullRefreshing = true
+                scope.launch {
+                    try {
+                        coroutineScope {
+                            launch { load() }
+                            launch { loadDownloaders(downloaders) }
+                        }
+                    } finally { pullRefreshing = false }
+                }
+            }
+        }, Modifier.padding(pad)) {
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(top = 0.dp, bottom = 12.dp + LocalFloatingNavigationPadding.current)) {
             if (loading && overview == null) item { LoadFeedback("正在加载…") }
             if (error != null) item { LoadFeedback("${error!!} · 下拉重试") }
             if (airportError != null) item { LoadFeedback("${airportError!!} · 下拉重试") }
-            val metrics = overview?.serverEntries().orEmpty().associateBy { it.id }
-            managedServers.forEach { server ->
-                val n = metrics[server.id]?.metrics ?: ServerStatus()
-                item(key = server.id) { ServerCard(server.name, n.meshIp ?: server.meshIp, n.uptime, n.cpu, n.memory,
-                    formatRate(n.network?.txBps ?: 0.0), formatRate(n.network?.rxBps ?: 0.0), n.status == "up", n.coreServices,
-                    publicIp = n.publicIp, supportsLogs = server.id == "nas", onClick = { navController.navigate(serverDetailRoute(server.id)) },
-                    onTrends = { navController.navigate("trends/${server.id}") }, onContainers = { navController.navigate("containers/${server.id}") },
-                    onServices = { navController.navigate("services/${server.id}") }) }
+            if (sortMode) {
+                item { Text("使用卡片右侧的上下箭头调整顺序；下载器与服务器可混合排列。", fontSize = 11.sp, color = Muted) }
+            }
+            orderedEntries.forEachIndexed { index, entry ->
+                val reorder = if (sortMode) ReorderControls(
+                    canMoveUp = index > 0,
+                    canMoveDown = index < orderedEntries.lastIndex,
+                    onMoveUp = { moveEntry(index, -1) },
+                    onMoveDown = { moveEntry(index, 1) }
+                ) else null
+                val server = entry.server
+                if (server != null) {
+                    val n = metrics[server.id]?.metrics ?: ServerStatus()
+                    item(key = entry.key) {
+                        if (serverListStyle == ServerListStyle.COMPACT) {
+                            ServerCompactRow(
+                                name = server.name,
+                                meshIp = n.meshIp ?: server.meshIp,
+                                online = n.status == "up",
+                                cpu = n.cpu,
+                                memory = n.memory,
+                                upload = formatRate(n.network?.txBps ?: 0.0),
+                                download = formatRate(n.network?.rxBps ?: 0.0),
+                                reorder = reorder,
+                                onClick = { if (!sortMode) navController.navigate(serverDetailRoute(server.id)) }
+                            )
+                        } else {
+                            ServerCard(
+                                server.name, n.meshIp ?: server.meshIp, n.uptime, n.cpu, n.memory,
+                                formatRate(n.network?.txBps ?: 0.0), formatRate(n.network?.rxBps ?: 0.0), n.status == "up", n.coreServices,
+                                publicIp = n.publicIp, supportsLogs = server.id == "nas", reorder = reorder,
+                                forceExpanded = sortMode,
+                                onClick = { if (!sortMode) navController.navigate(serverDetailRoute(server.id)) },
+                                onTrends = { navController.navigate("trends/${server.id}") },
+                                onContainers = { navController.navigate("containers/${server.id}") },
+                                onServices = { navController.navigate("services/${server.id}") }
+                            )
+                        }
+                    }
+                }
+                val downloader = entry.downloader
+                if (downloader != null) {
+                    item(key = entry.key) {
+                        val session = downloaderSessions[downloader.id]
+                        val stats = downloaderStats[downloader.id]
+                        val failed = downloader.id in downloaderFailed
+                        if (serverListStyle == ServerListStyle.COMPACT) {
+                            DownloaderCompactRow(
+                                server = downloader,
+                                stats = stats,
+                                failed = failed,
+                                reorder = reorder,
+                                onClick = { if (!sortMode) navController.navigate("downloader/${downloader.id}") },
+                                onEdit = { if (!sortMode) navController.navigate("downloader-edit/${downloader.id}") }
+                            )
+                        } else {
+                            DownloaderServerCard(
+                                server = downloader,
+                                session = session,
+                                stats = stats,
+                                failed = failed,
+                                reorder = reorder,
+                                onClick = { if (!sortMode) navController.navigate("downloader/${downloader.id}") },
+                                onEdit = { if (!sortMode) navController.navigate("downloader-edit/${downloader.id}") }
+                            )
+                        }
+                    }
+                }
+            }
+            if (downloaders.isEmpty() && managedServers.isNotEmpty()) {
+                item(key = "downloader-empty") {
+                    OutlinedButton(
+                        onClick = { navController.navigate("downloader-edit/new") },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.Add, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("添加下载器卡片")
+                    }
+                }
             }
             overview?.router?.let { r -> item { RouterCard(r, onClick = { navController.navigate("router") }) } }
-            airportTraffic?.items?.takeIf { it.isNotEmpty() }?.let { items -> item { AirportTrafficCard(items) } }
+            mihomoAirports?.takeIf { it.instances.any { instance -> instance.items.isNotEmpty() } }
+                ?.let { data -> item { AirportBoardCard(data) } }
         }
         }
     }
 }
+
+@Composable
+private fun DownloaderServerCard(
+    server: DownloaderServer,
+    session: DownloaderSession?,
+    stats: DownloaderStats?,
+    failed: Boolean,
+    reorder: ReorderControls?,
+    onClick: () -> Unit,
+    onEdit: () -> Unit
+) {
+    val protocolTag = when (server.protocol) {
+        io.github.nasmonitor.app.data.DownloaderProtocol.TRANSMISSION -> "TR"
+        io.github.nasmonitor.app.data.DownloaderProtocol.QBITTORRENT -> "QB"
+    }
+    val protocolColor = when (server.protocol) {
+        io.github.nasmonitor.app.data.DownloaderProtocol.TRANSMISSION -> Purple
+        io.github.nasmonitor.app.data.DownloaderProtocol.QBITTORRENT -> Green
+    }
+    LiquidAwareCard(
+        Modifier.fillMaxWidth().clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(CardWhite),
+        elevation = MonitorCardElevation(1.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (failed) Red.copy(alpha = 0.5f) else Green.copy(alpha = 0.35f))
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(42.dp).clip(RoundedCornerShape(13.dp)).background(protocolColor.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(protocolTag, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = protocolColor)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(server.name, fontSize = TextH2, fontWeight = FontWeight.Bold, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        buildString {
+                            append(server.protocol.label)
+                            if (!session?.version.isNullOrBlank()) append(" · ${session?.version}")
+                        },
+                        fontSize = TextCaption, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (reorder != null) {
+                    ReorderButtons(reorder)
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (failed) Icons.Default.LinkOff else Icons.Default.Link,
+                            contentDescription = if (failed) "连接失败" else "连接正常",
+                            tint = if (failed) Red else Green,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        IconButton(onClick = onEdit, modifier = Modifier.size(34.dp)) {
+                            Icon(Icons.Default.Edit, "下载器设置", tint = Ink, modifier = Modifier.size(19.dp))
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DownloaderSpeedTile(
+                    label = "下载",
+                    value = TransmissionClient.formatSpeed(stats?.downloadSpeed ?: 0),
+                    color = Blue,
+                    surface = BlueSoft,
+                    modifier = Modifier.weight(1f)
+                )
+                DownloaderSpeedTile(
+                    label = "上传",
+                    value = TransmissionClient.formatSpeed(stats?.uploadSpeed ?: 0),
+                    color = Green,
+                    surface = Green.copy(alpha = 0.12f),
+                    modifier = Modifier.weight(1f)
+                )
+                DownloaderTaskTile(
+                    active = stats?.activeTorrentCount ?: 0,
+                    total = stats?.torrentCount ?: 0,
+                    failed = failed,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                DownloaderMetric("总下载", stats?.totalDownloaded?.takeIf { it >= 0 }?.let(TransmissionClient::formatBytes) ?: "—")
+                DownloaderMetric("总上传", stats?.totalUploaded?.takeIf { it >= 0 }?.let(TransmissionClient::formatBytes) ?: "—")
+                DownloaderMetric("I/O 队列", stats?.queuedIoCount?.takeIf { it >= 0 }?.toString() ?: "—")
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                DownloaderMetric("错误数", "${stats?.errorTorrentCount ?: 0}", if ((stats?.errorTorrentCount ?: 0) > 0) Red else Ink)
+                DownloaderMetric("磁盘空间", stats?.freeSpace?.takeIf { it >= 0 }?.let(TransmissionClient::formatBytes) ?: "—")
+            }
+            if (session?.altSpeedEnabled == true) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "备用限速已开启 · ↓${speedLimitLabel(session.altSpeedDown)} ↑${speedLimitLabel(session.altSpeedUp)}",
+                    fontSize = TextTiny, color = Amber
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ServerCompactRow(
+    name: String,
+    meshIp: String,
+    online: Boolean,
+    cpu: Double,
+    memory: Double,
+    upload: String,
+    download: String,
+    reorder: ReorderControls?,
+    onClick: () -> Unit
+) {
+    LiquidAwareCard(
+        Modifier.fillMaxWidth().clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(CardWhite),
+        elevation = MonitorCardElevation(1.dp)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.width(6.dp))
+                    StatusBadge(if (online) "在线" else "离线", if (online) "ok" else "err")
+                }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "$meshIp · CPU ${cpu.toInt()}% · 内存 ${memory.toInt()}%",
+                    fontSize = TextTiny, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (reorder != null) {
+                ReorderButtons(reorder)
+            } else {
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("↓$download", fontSize = TextTiny, color = Blue, maxLines = 1)
+                    Text("↑$upload", fontSize = TextTiny, color = Green, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloaderCompactRow(
+    server: DownloaderServer,
+    stats: DownloaderStats?,
+    failed: Boolean,
+    reorder: ReorderControls?,
+    onClick: () -> Unit,
+    onEdit: () -> Unit
+) {
+    val protocolTag = when (server.protocol) {
+        io.github.nasmonitor.app.data.DownloaderProtocol.TRANSMISSION -> "TR"
+        io.github.nasmonitor.app.data.DownloaderProtocol.QBITTORRENT -> "QB"
+    }
+    LiquidAwareCard(
+        Modifier.fillMaxWidth().clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(CardWhite),
+        elevation = MonitorCardElevation(1.dp)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(server.name, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.width(6.dp))
+                    Text(protocolTag, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Muted)
+                }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    if (failed) "连接失败" else "任务 ${stats?.activeTorrentCount ?: 0}/${stats?.torrentCount ?: 0}",
+                    fontSize = TextTiny, color = if (failed) Red else Muted, maxLines = 1
+                )
+            }
+            if (reorder != null) {
+                ReorderButtons(reorder)
+            } else {
+                IconButton(onClick = onEdit, modifier = Modifier.size(30.dp)) {
+                    Icon(Icons.Default.Edit, "下载器设置", tint = Ink, modifier = Modifier.size(16.dp))
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("↓${TransmissionClient.formatSpeed(stats?.downloadSpeed ?: 0)}", fontSize = TextTiny, color = Blue, maxLines = 1)
+                    Text("↑${TransmissionClient.formatSpeed(stats?.uploadSpeed ?: 0)}", fontSize = TextTiny, color = Green, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloaderSpeedTile(
+    label: String,
+    value: String,
+    color: Color,
+    surface: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.clip(RoundedCornerShape(12.dp)).background(surface).padding(10.dp)
+    ) {
+        Text(value, fontSize = TextH2, fontWeight = FontWeight.Bold, color = color, maxLines = 1)
+        Spacer(Modifier.height(2.dp))
+        Text(label, fontSize = TextTiny, color = Muted)
+    }
+}
+
+@Composable
+private fun DownloaderTaskTile(
+    active: Int,
+    total: Int,
+    failed: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.clip(RoundedCornerShape(12.dp)).background(CardTint).padding(10.dp)
+    ) {
+        Text("$active/$total", fontSize = TextH2, fontWeight = FontWeight.Bold, color = if (failed) Red else Ink, maxLines = 1)
+        Spacer(Modifier.height(2.dp))
+        Text(if (failed) "连接失败" else "任务", fontSize = TextTiny, color = if (failed) Red else Muted)
+    }
+}
+
+@Composable
+private fun DownloaderMetric(label: String, value: String, valueColor: Color = Ink) {
+    Column {
+        Text(label, fontSize = TextTiny, color = Muted)
+        Spacer(Modifier.height(2.dp))
+        Text(value, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = valueColor, maxLines = 1)
+    }
+}
+
 
 @Composable
 fun AlertsScreen(navController: NavHostController) {
@@ -518,9 +1105,7 @@ fun AlertsScreen(navController: NavHostController) {
         } finally { loading = false }
     } }
     LaunchedEffect(Unit) { load() }
-    Scaffold(containerColor = PageBackground, topBar = {
-        AppPageHeader("告警")
-    }) { pad ->
+    Scaffold(containerColor = PageBackground) { pad ->
         RefreshContainer(loading, { load() }, Modifier.padding(pad)) {
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp), verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp + LocalFloatingNavigationPadding.current)) {
             if (loading && overview == null) item { LoadFeedback("正在加载…") }
@@ -714,11 +1299,8 @@ fun ToolsScreen(navController: NavHostController) {
     Scaffold(
         containerColor = PageBackground,
         topBar = {
-            Column {
-                AppPageHeader("工具")
-                ToolHostTabs(hosts = hosts, selected = selected) { target ->
-                    scope.launch { pagerState.animateScrollToPage(target) }
-                }
+            ToolHostTabs(hosts = hosts, selected = selected) { target ->
+                scope.launch { pagerState.animateScrollToPage(target) }
             }
         }
     ) { pad ->
@@ -774,6 +1356,10 @@ private fun ToolHostPage(host: ToolHost, navController: NavHostController) {
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        item(key = "downloaders") {
+            val downloaders by io.github.nasmonitor.app.DownloaderStore.servers.collectAsState()
+            DownloaderEntryCard(count = downloaders.size) { navController.navigate("downloaders") }
+        }
         items(entries, key = { it.route }) { entry ->
             ToolEntry(entry.icon, entry.title, entry.subtitle, Modifier.fillMaxWidth()) {
                 navController.navigate(entry.route)
@@ -794,7 +1380,22 @@ private fun ScrollableSharedTools(navController: NavHostController) {
             ToolEntry(Icons.Default.QuestionAnswer, "知识问答", "AnythingLLM 知识库", Modifier.weight(1f)) { navController.navigate("ask") }
             ToolEntry(Icons.Default.Link, "知识归档", "链接与文件收藏", Modifier.weight(1f)) { navController.navigate("knowledge-archive") }
         }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ToolEntry(Icons.Default.SwapVert, "代理", "Mihomo 双实例与机场", Modifier.weight(1f)) { navController.navigate("proxy") }
+        }
     }
+}
+
+@Composable
+private fun DownloaderEntryCard(count: Int, onClick: () -> Unit) {
+    ToolEntry(
+        icon = Icons.Default.Download,
+        title = "下载器管理",
+        subtitle = if (count == 0) "连接下载器查看速度与任务" else "已配置 $count 台下载器",
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick
+    )
 }
 
 @Composable

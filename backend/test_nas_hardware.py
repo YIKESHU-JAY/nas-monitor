@@ -108,7 +108,6 @@ class NasHardwareTests(unittest.TestCase):
         response.__exit__ = Mock(return_value=False)
         response.read.return_value = json.dumps(self.entity()).encode()
         with patch.object(api_server, "HA_TOKEN", "test-token"), \
-             patch.object(api_server, "HA_URL", "http://ha.example.invalid/api/states"), \
              patch.object(api_server.urllib.request, "urlopen", return_value=response) as fetch:
             self.assertEqual({"BMC · PCH_TEMP": 46}, api_server.get_nas_hardware_temperatures())
             self.assertTrue(fetch.call_args.args[0].full_url.endswith("/api/states/sensor.nas_hardware"))

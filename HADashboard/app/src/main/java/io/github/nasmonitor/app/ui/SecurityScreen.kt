@@ -78,10 +78,7 @@ fun SecurityScreen() {
     val selected = pagerState.currentPage.coerceIn(0, hosts.lastIndex)
 
     Scaffold(containerColor = PageBackground, topBar = {
-        Column {
-            AppPageHeader("安全")
-            SecurityHostTabs(hosts, selected) { target -> scope.launch { pagerState.animateScrollToPage(target) } }
-        }
+        SecurityHostTabs(hosts, selected) { target -> scope.launch { pagerState.animateScrollToPage(target) } }
     }) { pad ->
         HorizontalPager(
             state = pagerState,

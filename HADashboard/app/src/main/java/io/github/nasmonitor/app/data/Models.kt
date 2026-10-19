@@ -87,6 +87,7 @@ data class AirportTrafficResponse(
 data class AirportTrafficItem(
     val id: String = "",
     val name: String = "",
+    val connections: Int = 0,
     @SerializedName("remaining_gb") val remainingGb: Double = 0.0,
     @SerializedName("today_used_gb") val todayUsedGb: Double? = null,
     @SerializedName("today_usage_partial") val todayUsagePartial: Boolean = true,
@@ -95,6 +96,127 @@ data class AirportTrafficItem(
     @SerializedName("reset_days") val resetDays: Int? = null,
     val expire: String? = null,
     val level: String = "normal"
+)
+
+// ── Mihomo proxy instances ──
+data class MihomoOverviewResponse(
+    val instances: List<MihomoInstance> = emptyList()
+)
+
+data class MihomoInstance(
+    val id: String = "",
+    val name: String = "",
+    val available: Boolean = true,
+    val error: String? = null,
+    val version: String = "",
+    val meta: Boolean = false,
+    val mode: String = "",
+    @SerializedName("mixed_port") val mixedPort: Int? = null,
+    val connections: Int = 0,
+    @SerializedName("upload_total") val uploadTotal: Long = 0,
+    @SerializedName("download_total") val downloadTotal: Long = 0,
+    @SerializedName("upload_speed") val uploadSpeed: Long = 0,
+    @SerializedName("download_speed") val downloadSpeed: Long = 0,
+    val groups: List<MihomoGroup> = emptyList(),
+    val panel: String = ""
+)
+
+data class MihomoGroup(
+    val name: String = "",
+    val type: String = "",
+    val now: String? = null,
+    val all: List<String> = emptyList(),
+    val hidden: Boolean = false
+)
+
+data class MihomoAirportsResponse(
+    val instances: List<MihomoAirportInstance> = emptyList()
+)
+
+data class MihomoAirportInstance(
+    val id: String = "",
+    val name: String = "",
+    val items: List<AirportTrafficItem> = emptyList(),
+    val history: List<MihomoTrafficPoint> = emptyList(),
+    @SerializedName("history_seconds") val historySeconds: Int = 5,
+    val timestamp: Long = 0,
+    val error: String? = null
+)
+
+data class MihomoTrafficPoint(
+    val ts: Long = 0,
+    val up: Long = 0,
+    val down: Long = 0,
+    val connections: Int = 0
+)
+
+data class MihomoGroupSelectResponse(
+    val group: String = "",
+    val now: String? = null,
+    val applied: Boolean = false
+)
+
+data class MihomoDelayResponse(
+    val name: String = "",
+    val delay: Int? = null
+)
+
+data class MihomoPanelUrl(
+    val url: String = ""
+)
+
+data class MihomoConnection(
+    val id: String = "",
+    val host: String = "",
+    val destination: String = "",
+    val port: String = "",
+    val network: String = "",
+    val process: String = "",
+    val rule: String = "",
+    val chains: List<String> = emptyList(),
+    val upload: Long = 0,
+    val download: Long = 0,
+    val start: String = ""
+)
+
+data class MihomoConnectionsResponse(
+    val connections: List<MihomoConnection> = emptyList(),
+    @SerializedName("upload_total") val uploadTotal: Long = 0,
+    @SerializedName("download_total") val downloadTotal: Long = 0
+)
+
+data class MihomoRule(
+    val index: Int = 0,
+    val type: String = "",
+    val payload: String = "",
+    val proxy: String = "",
+    val size: Int? = null,
+    val disabled: Boolean = false
+)
+
+data class MihomoRulesResponse(
+    val rules: List<MihomoRule> = emptyList()
+)
+
+data class MihomoConfigs(
+    val mode: String = "",
+    @SerializedName("mixed-port") val mixedPort: Int? = null,
+    @SerializedName("socks-port") val socksPort: Int? = null,
+    @SerializedName("allow-lan") val allowLan: Boolean? = null,
+    @SerializedName("log-level") val logLevel: String? = null,
+    val ipv6: Boolean? = null
+)
+
+data class MihomoProvider(
+    val name: String = "",
+    @SerializedName("vehicle_type") val vehicleType: String = "",
+    @SerializedName("updated_at") val updatedAt: String = "",
+    @SerializedName("node_count") val nodeCount: Int = 0,
+    @SerializedName("has_subscription") val hasSubscription: Boolean = false
+)
+
+data class MihomoProvidersResponse(
+    val providers: List<MihomoProvider> = emptyList()
 )
 
 // ── NAS Detail ──
@@ -354,7 +476,8 @@ data class NewApiChannel(val id:Int=0,val name:String="",val status:Int=0,val mo
 data class NewApiModelMeta(val id: Int = 0, @SerializedName("model_name") val modelName: String = "", val status: Int = 0, @SerializedName("bound_channels") val boundChannels: List<NewApiBoundChannel> = emptyList(), @SerializedName("enable_groups") val enableGroups: List<String> = emptyList())
 data class NewApiBoundChannel(val name: String = "", val type: Int = 0)
 data class NewApiModelPerformance(val model:String="",val requests:Int=0,val success:Int=0,val failed:Int=0,@com.google.gson.annotations.SerializedName("client_cancelled") val clientCancelled:Int=0,val unknown:Int=0,@com.google.gson.annotations.SerializedName("success_rate") val successRate:Double=0.0,@com.google.gson.annotations.SerializedName("avg_use_time") val avgUseTime:Double=0.0,@com.google.gson.annotations.SerializedName("avg_frt") val avgFrt:Double?=null)
-data class NewApiGatewayOverview(val channels:List<NewApiChannel> = emptyList(),val models:List<NewApiModelPerformance> = emptyList(),@com.google.gson.annotations.SerializedName("recent_requests") val recentRequests:Int=0,@com.google.gson.annotations.SerializedName("disabled_channels") val disabledChannels:Int=0,@com.google.gson.annotations.SerializedName("auto_banned_channels") val autoBannedChannels:Int=0)
+data class NewApiGatewayOverview(val channels:List<NewApiChannel> = emptyList(),val models:List<NewApiModelPerformance> = emptyList(),@com.google.gson.annotations.SerializedName("requests_24h") val requests24h:Int?=null,@com.google.gson.annotations.SerializedName("recent_requests") val recentRequests:Int=0,@com.google.gson.annotations.SerializedName("disabled_channels") val disabledChannels:Int=0,@com.google.gson.annotations.SerializedName("auto_banned_channels") val autoBannedChannels:Int=0,@com.google.gson.annotations.SerializedName("rpm") val rpm:Int?=null)
+data class NewApiPerformanceResponse(val models:List<NewApiModelPerformance> = emptyList(),val window:String="24h",@com.google.gson.annotations.SerializedName("generated_at") val generatedAt:String?=null)
 data class NewApiAffinityCache(val enabled:Boolean=false,val total:Int=0,val unknown:Int=0,@com.google.gson.annotations.SerializedName("cache_capacity") val cacheCapacity:Int=0,@com.google.gson.annotations.SerializedName("cache_algo") val cacheAlgo:String="")
 data class NewApiAffinityState(val enabled:Boolean=false,val cache:NewApiAffinityCache=NewApiAffinityCache())
 data class NewApiRoutingPolicy(

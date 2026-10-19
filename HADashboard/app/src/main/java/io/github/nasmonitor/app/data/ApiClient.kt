@@ -1,5 +1,6 @@
 package io.github.nasmonitor.app
 
+import android.net.Uri
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -213,6 +214,7 @@ object ApiClient {
         val obj = gson.fromJson(raw, Map::class.java)
         val points = (obj["points"] as? List<Map<String, Any>>)?.map { p ->
             TrendPoint(
+                t = parseTrendTimestamp(p["t"]),
                 cpu = (p["cpu"] as? Number)?.toFloat() ?: 0f,
                 mem = (p["mem"] as? Number)?.toFloat() ?: 0f,
                 disk = (p["disk"] as? Number)?.toFloat() ?: 0f,
@@ -221,6 +223,16 @@ object ApiClient {
             )
         } ?: emptyList()
         TrendResponse(host = obj["host"] as? String ?: host, minutes = (obj["minutes"] as? Number)?.toInt() ?: minutes, points = points)
+    }
+
+    private fun parseTrendTimestamp(value: Any?): Double = when (value) {
+        is Number -> value.toDouble()
+        is String -> runCatching {
+            java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli() / 1000.0
+        }.getOrElse {
+            runCatching { java.time.LocalDateTime.parse(value).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli() / 1000.0 }.getOrDefault(0.0)
+        }
+        else -> 0.0
     }
 
     suspend fun getContainers(host: String): DockerData = withContext(Dispatchers.IO) {
@@ -243,11 +255,153 @@ object ApiClient {
         obj["logs"] as? String ?: "无日志"
     }
 
+    suspend fun containerAction(host: String, name: String, action: String): DockerData = withContext(Dispatchers.IO) {
+        require(host == "nas") { "仅支持管理 NAS 本机容器" }
+        require(action in setOf("start", "stop", "restart")) { "不支持的容器操作" }
+        val encodedHost = URLEncoder.encode(host, "UTF-8")
+        val encodedName = URLEncoder.encode(name, "UTF-8")
+        val encodedAction = URLEncoder.encode(action, "UTF-8")
+        val request = Request.Builder()
+            .url("$baseUrl/api/containers/$encodedHost/$encodedName/$encodedAction")
+            .addHeader("Authorization", "Bearer $apiToken")
+            .post("".toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val message = runCatching {
+                    gson.fromJson(raw, com.google.gson.JsonObject::class.java)["error"].asString
+                }.getOrNull()
+                throw IOException(message ?: "HTTP ${response.code}")
+            }
+            gson.fromJson(raw, com.google.gson.JsonObject::class.java)
+                .getAsJsonObject("containers")
+                ?.let { gson.fromJson(it, DockerData::class.java) } ?: DockerData()
+        }
+    }
+
     @Deprecated("Use getContainerLog(host, name) to preserve host scope")
     suspend fun getContainerLog(name: String): String = getContainerLog("nas", name)
 
     suspend fun getAirportTraffic(): AirportTrafficResponse = withContext(Dispatchers.IO) {
         gson.fromJson(get("/api/airport-traffic"), AirportTrafficResponse::class.java)
+    }
+
+    suspend fun getMihomoOverview(): MihomoOverviewResponse = withContext(Dispatchers.IO) {
+        gson.fromJson(get("/api/mihomo/overview"), MihomoOverviewResponse::class.java)
+    }
+
+    suspend fun getMihomoAirports(): MihomoAirportsResponse = withContext(Dispatchers.IO) {
+        gson.fromJson(get("/api/mihomo/airports"), MihomoAirportsResponse::class.java)
+    }
+
+    suspend fun selectMihomoGroup(instance: String, group: String, target: String): MihomoGroupSelectResponse = withContext(Dispatchers.IO) {
+        val payload = mapOf("target" to target)
+        val body = gson.toJson(payload).toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url("$baseUrl/api/mihomo/instances/${Uri.encode(instance)}/groups/${Uri.encode(group)}/select")
+            .header("Authorization", "Bearer $apiToken")
+            .post(body)
+            .build()
+        client.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val message = runCatching { gson.fromJson(raw, com.google.gson.JsonObject::class.java)["error"].asString }.getOrNull()
+                throw IOException(message ?: "切换失败 HTTP ${response.code}")
+            }
+            gson.fromJson(raw, MihomoGroupSelectResponse::class.java)
+        }
+    }
+
+    suspend fun testMihomoNode(instance: String, name: String): MihomoDelayResponse = withContext(Dispatchers.IO) {
+        gson.fromJson(
+            get("/api/mihomo/instances/${Uri.encode(instance)}/proxies/${Uri.encode(name)}/delay"),
+            MihomoDelayResponse::class.java
+        )
+    }
+
+    suspend fun getMihomoPanelUrl(instance: String = "core"): MihomoPanelUrl = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("$baseUrl/api/mihomo/panel-url?instance=${Uri.encode(instance)}")
+            .header("Authorization", "Bearer $apiToken")
+            .build()
+        client.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw IOException("管理面板暂时不可用")
+            gson.fromJson(raw, MihomoPanelUrl::class.java)
+        }
+    }
+
+    suspend fun getMihomoConnections(instance: String, limit: Int = 100): MihomoConnectionsResponse =
+        withContext(Dispatchers.IO) {
+            gson.fromJson(
+                get("/api/mihomo/instances/connections?instance=${Uri.encode(instance)}&limit=$limit"),
+                MihomoConnectionsResponse::class.java
+            )
+        }
+
+    suspend fun getMihomoRules(instance: String): MihomoRulesResponse = withContext(Dispatchers.IO) {
+        gson.fromJson(
+            get("/api/mihomo/instances/rules?instance=${Uri.encode(instance)}"),
+            MihomoRulesResponse::class.java
+        )
+    }
+
+    suspend fun getMihomoConfigs(instance: String): MihomoConfigs = withContext(Dispatchers.IO) {
+        gson.fromJson(
+            get("/api/mihomo/instances/configs?instance=${Uri.encode(instance)}"),
+            MihomoConfigs::class.java
+        )
+    }
+
+    suspend fun getMihomoProviders(instance: String): MihomoProvidersResponse = withContext(Dispatchers.IO) {
+        gson.fromJson(
+            get("/api/mihomo/instances/providers?instance=${Uri.encode(instance)}"),
+            MihomoProvidersResponse::class.java
+        )
+    }
+
+    suspend fun closeMihomoConnection(instance: String, id: String): Boolean = withContext(Dispatchers.IO) {
+        postJson("/api/mihomo/instances/${Uri.encode(instance)}/connections/${Uri.encode(id)}/close", emptyMap())
+    }
+
+    suspend fun closeAllMihomoConnections(instance: String): Boolean = withContext(Dispatchers.IO) {
+        postJson("/api/mihomo/instances/${Uri.encode(instance)}/connections/close-all", emptyMap())
+    }
+
+    suspend fun setMihomoRuleDisabled(instance: String, index: Int, disabled: Boolean): Boolean =
+        withContext(Dispatchers.IO) {
+            postJson("/api/mihomo/instances/${Uri.encode(instance)}/rules/disable",
+                mapOf("index" to index, "disabled" to disabled))
+        }
+
+    suspend fun setMihomoConfig(instance: String, key: String, value: Any): Boolean = withContext(Dispatchers.IO) {
+        postJson("/api/mihomo/instances/${Uri.encode(instance)}/config", mapOf("key" to key, "value" to value))
+    }
+
+    suspend fun runMihomoProviderAction(instance: String, name: String, action: String): Boolean =
+        withContext(Dispatchers.IO) {
+            postJson("/api/mihomo/instances/${Uri.encode(instance)}/providers/${Uri.encode(name)}/$action",
+                emptyMap())
+        }
+
+    private fun postJson(path: String, payload: Map<String, Any?>): Boolean {
+        val body = gson.toJson(payload).toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url("$baseUrl$path")
+            .header("Authorization", "Bearer $apiToken")
+            .post(body)
+            .build()
+        client.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val message = runCatching {
+                    gson.fromJson(raw, com.google.gson.JsonObject::class.java)["error"].asString
+                }.getOrNull()
+                throw IOException(message ?: "操作失败 HTTP ${response.code}")
+            }
+            return true
+        }
     }
 
     suspend fun getRouterStatus(): RouterStatus = withContext(Dispatchers.IO) {
@@ -359,6 +513,9 @@ object ApiClient {
     suspend fun getNewApiGateway(): NewApiGatewayOverview = withContext(Dispatchers.IO) {
         gson.fromJson(get("/api/newapi/overview"), NewApiGatewayOverview::class.java)
     }
+    suspend fun getNewApiPerformance(): NewApiPerformanceResponse = withContext(Dispatchers.IO) {
+        gson.fromJson(get("/api/newapi/performance"), NewApiPerformanceResponse::class.java)
+    }
     suspend fun getNewApiBalance(): NewApiBalance = withContext(Dispatchers.IO) {
         gson.fromJson(get("/api/newapi/balance"), NewApiBalance::class.java)
     }
@@ -423,6 +580,7 @@ object ApiClient {
     suspend fun archiveFile(fileName: String, bytes: ByteArray): ArchiveTask = withContext(Dispatchers.IO) {
         val fileBody = bytes.toRequestBody("application/octet-stream".toMediaType())
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("addToWorkspaces", "nas-docker")
             .addFormDataPart("metadata", "{}")
             .addFormDataPart("file", fileName, fileBody)
             .build()

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from .shadow_store import atomic_write_snapshot, shadow_path
 
 WORKBUDDY_BASE = os.environ.get("WORKBUDDY_BASE", "")
-WORKBUDDY_CONFIG = os.environ.get("WORKBUDDY_CONFIG", "/run/secrets/workbuddy-config.json")
+WORKBUDDY_CONFIG = os.environ.get("WORKBUDDY_CONFIG", "/run/secrets/workbuddy/config.json")
 SHANGHAI = timezone(timedelta(hours=8))
 SHADOW_CAP = "workbuddy_credit_cap.json"
 WB_CAP_KEEP_DAYS = 35
@@ -26,6 +26,9 @@ def _valid_credit(value):
 
 
 def _read_json(path):
+    # 兼容目录挂载（新）与整文件挂载（旧）。
+    if os.path.isdir(path):
+        path = os.path.join(path, "config.json")
     with open(path, encoding="utf-8") as stream:
         value = json.load(stream)
     return value if isinstance(value, dict) else {}
@@ -55,6 +58,35 @@ def _load_cap() -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _billing_map():
+    """billing 聚合结果 {uid: {"used","remain","size"}}；不可用时返回 {}。
+
+    国际版（realm=global）上游 /status 的 credits 恒为 0（不参与 CN 签到体系），
+    其真实余额只能从 billing API 取；基线若直接写 0 会导致 App 端分母为 0。
+    """
+    try:
+        from .workbuddy_status import _workbuddy_credit_cached
+    except Exception:
+        return {}
+    try:
+        mapping, err = _workbuddy_credit_cached()
+    except Exception:
+        return {}
+    if err or not isinstance(mapping, dict):
+        return {}
+    return mapping
+
+
+def _baseline_credit(account, billing):
+    """基线积分：复用采集侧的 realm 感知口径，返回 (credits, source_note)。
+
+    CN 账号以签到积分为准（0 合法）；国际版上游恒为 0，改用 billing 剩余额度，
+    两者都拿不到时返回 (None, None)，表示跳过该账号而不是写 0。
+    """
+    from .workbuddy_status import cap_baseline_credit
+    return cap_baseline_credit(account, billing)
+
+
 def _backfill_missing_days(data, workbuddy, now_local):
     """补写 23:59 cron 漏跑的日期基线（最多回看 3 天）。
 
@@ -64,15 +96,19 @@ def _backfill_missing_days(data, workbuddy, now_local):
     today = now_local.date()
     values = {}
     captured_at = now_local.isoformat(timespec="seconds")
+    billing = _billing_map()
     for account in (workbuddy or {}).get("accounts") or []:
         uid = account.get("uid")
-        credit = account.get("credits")
-        if uid and _valid_credit(credit):
-            values[str(uid)] = {
-                "credits": int(credit),
+        credit, note = _baseline_credit(account, billing)
+        if uid and credit is not None:
+            entry = {
+                "credits": credit,
                 "captured_at": captured_at,
                 "source": "backfill",
             }
+            if note:
+                entry["source_note"] = note
+            values[str(uid)] = entry
     if not values:
         return 0
     filled = 0
@@ -135,15 +171,19 @@ def roll_cap(workbuddy, now_local, source):
     day = (local_now.date() + timedelta(days=1)).isoformat()
     values = {}
     captured_at = local_now.isoformat(timespec="seconds")
+    billing = _billing_map()
     for account in (workbuddy or {}).get("accounts") or []:
         uid = account.get("uid")
-        credit = account.get("credits")
-        if uid and _valid_credit(credit):
-            values[str(uid)] = {
-                "credits": int(credit),
+        credit, note = _baseline_credit(account, billing)
+        if uid and credit is not None:
+            entry = {
+                "credits": credit,
                 "captured_at": captured_at,
                 "source": source,
             }
+            if note:
+                entry["source_note"] = note
+            values[str(uid)] = entry
     if not values:
         return 0
     data = _load_cap()

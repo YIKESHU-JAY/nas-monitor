@@ -1,4 +1,4 @@
-# NAS Monitor 源码交付（v214）
+# NAS Monitor 源码交付（v236）
 
 [English](README.en.md) · 中文
 
@@ -29,7 +29,7 @@ GitHub 工作流仅手动触发；上传源码不会自动构建 APK 或发布�
 - `backend/api_server.py`：Python 3.11 后端入口。
 - `backend/web/`：实际 Web 单页，后端同源托管，无需 Node 构建。
 - `backend/collectors/`：上游适配与可选采集任务。
-- `HADashboard/`：Android v214/214.0，包名 `io.github.nasmonitor.app`，JDK 17 / SDK 34 / Gradle 8.7。
+- `HADashboard/`：Android v236/236.0，包名 `io.github.nasmonitor.app`，JDK 17 / SDK 34 / Gradle 8.7。
 - `docs/需求规格.md` 与 `docs/assets/`：功能需求与结构图。需求文档中的伪代码不是启动入口。
 - [配置与凭据获取说明](docs/配置与凭据获取说明.md)：配置作用、获取方式与保管边界。
 - [环境勘察表](docs/环境勘察表.example.md)：让接收方填写自己的服务拓扑。

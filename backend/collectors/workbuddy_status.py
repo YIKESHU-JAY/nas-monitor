@@ -2,20 +2,32 @@ import glob
 import json
 import os
 import threading
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from .shadow_store import atomic_write_json, atomic_write_snapshot, shadow_path, snapshot_target
 
 WORKBUDDY_BASE = os.environ.get("WORKBUDDY_BASE", "")
-WORKBUDDY_CONFIG = os.environ.get("WORKBUDDY_CONFIG", "/run/secrets/workbuddy-config.json")
+WORKBUDDY_CONFIG = os.environ.get("WORKBUDDY_CONFIG", "/run/secrets/workbuddy/config.json")
 WORKBUDDY_WAN1_BASE = os.environ.get("WORKBUDDY_WAN1_BASE", "")
-WORKBUDDY_WAN1_CONFIG = os.environ.get("WORKBUDDY_WAN1_CONFIG", "/run/secrets/workbuddy-wan1-config.json")
+WORKBUDDY_WAN1_CONFIG = os.environ.get("WORKBUDDY_WAN1_CONFIG", "/run/secrets/workbuddy-wan1/config.json")
 WORKBUDDY_AUTH_DIR = os.environ.get("WORKBUDDY_AUTH_DIR", "/app/secrets/workbuddy-auths")
-# 各出口实例的授权目录：默认出口与 WAN1 出口各有独立 auths，
+WORKBUDDY_WAN3_BASE = os.environ.get("WORKBUDDY_WAN3_BASE", "")
+WORKBUDDY_WAN3_CONFIG = os.environ.get("WORKBUDDY_WAN3_CONFIG", "/run/secrets/workbuddy-wan3/config.json")
+# 各出口实例的授权目录：默认出口 / WAN1 各有独立 auths，
 # billing 积分必须按分组各自读取，否则 WAN1 账号取不到额度。
+#
+# wan3 不在本机：它的账号目录在 remote-nas 上，此前用 NFS 挂进容器。
+# 实测该 NFS 导出会抖动（导出为空 / root-squash 后 0700 目录读不到），
+# 且挂载失败会拖住 docker 启动，故**不再挂 NFS**。wan3 的账号清单与
+# 实时积分改走 remote-nas 上的 workbuddy-manager HTTP 接口（见 _panel_*）。
 WORKBUDDY_WAN1_AUTH_DIR = os.environ.get("WORKBUDDY_WAN1_AUTH_DIR", "/app/secrets/workbuddy-wan1-auths")
 _WORKBUDDY_AUTH_DIRS = (WORKBUDDY_AUTH_DIR, WORKBUDDY_WAN1_AUTH_DIR)
+# wan3 面板（remote-nas 上的 workbuddy-manager）地址与只读 API Token。
+# 两者都配了才启用；未配置时 wan3 仍可读上游 /status，只是拿不到实时积分。
+WORKBUDDY_WAN3_PANEL = os.environ.get("WORKBUDDY_WAN3_PANEL", "")
+WORKBUDDY_WAN3_PANEL_TOKEN = os.environ.get("WORKBUDDY_WAN3_PANEL_TOKEN", "")
 SHANGHAI = timezone(timedelta(hours=8))
 
 _CREDIT_CACHE = {"ts": 0.0, "value": None}
@@ -24,6 +36,10 @@ _AUTH_FINGERPRINT = None
 
 
 def _read_json(path):
+    # 兼容两种挂载：目录挂载（新，默认）与整文件挂载（旧）。
+    # 路径指向目录时取目录内的 config.json；文件缺失时抛错，由调用方按分组降级。
+    if os.path.isdir(path):
+        path = os.path.join(path, "config.json")
     with open(path, encoding="utf-8") as stream:
         value = json.load(stream)
     return value if isinstance(value, dict) else {}
@@ -116,17 +132,42 @@ def _today_used(used_now, channel_name):
     return used_now - prev
 
 
+def cap_baseline_credit(account, credit_map):
+    """基线分母候选值：返回 (credits, source_note)；None 表示跳过该账号。
+
+    国际版（realm=global）上游 /status 的 credits 恒为 0（不参与 CN 签到），
+    其真实余额只能取自 billing；把 0 当基线会让 App 端分母为 0。
+    CN 账号以签到积分为准，0 是合法值（当日额度已用尽）。
+    """
+    uid = str(account.get("uid") or "")
+    realm = str(account.get("realm") or "").strip().lower()
+    credit = account.get("credits")
+    if realm != "global" and _valid_credit(credit):
+        return int(credit), None
+    entry = (credit_map or {}).get(uid)
+    remain = entry.get("remain") if isinstance(entry, dict) else None
+    if _valid_credit(remain) and int(remain) > 0:
+        return int(remain), "billing_remain"
+    if _valid_credit(credit) and int(credit) > 0:
+        return int(credit), None
+    return None, None
+
+
 def _roll_cap_shadow(workbuddy, now_local, source, effective_date=None, merge_missing=False):
     """shadow 版 roll_wb_cap：写 shadow workbuddy_credit_cap.json。"""
     local_now = now_local.astimezone(SHANGHAI)
     day = effective_date or (local_now.date() + timedelta(days=1)).isoformat()
     values = {}
     captured_at = local_now.isoformat(timespec="seconds")
+    credit_map, _credit_err = _workbuddy_credit_cached()
     for account in (workbuddy or {}).get("accounts") or []:
         uid = account.get("uid")
-        credit = account.get("credits")
-        if uid and _valid_credit(credit):
-            values[str(uid)] = {"credits": int(credit), "captured_at": captured_at, "source": source}
+        credit, note = cap_baseline_credit(account, credit_map)
+        if uid and credit is not None:
+            entry = {"credits": credit, "captured_at": captured_at, "source": source}
+            if note:
+                entry["source_note"] = note
+            values[str(uid)] = entry
     if not values:
         return 0
     data = _load_cap_cutover()
@@ -136,9 +177,32 @@ def _roll_cap_shadow(workbuddy, now_local, source, effective_date=None, merge_mi
     if isinstance(existing, dict) and merge_missing:
         old_values = existing.get("values") if isinstance(existing.get("values"), dict) else {}
         missing = {uid: value for uid, value in values.items() if uid not in old_values}
-        if not missing:
+        # 修正历史误写的 0 基线。两类账号的 0 都不是真实额度，拿到正数就该覆盖，
+        # 否则 App 端分母一直是 0（表现为「积分 0 / 0」）：
+        #   · 国际版：上游 /status 的 credits 恒为 0，0 只代表「上游无此口径」；
+        #   · 走了权威兜底的账号（面板代查 / billing）：上游本地额度尚未同步时为 0，
+        #     例如 wan3 的账号目录不在本机、上游实例本地 credits 一直是 0。
+        # 只覆盖「有权威正数」的情形，CN 账号当日额度用尽的 0 不受影响。
+        repaired = {}
+        authoritative_uids = set()
+        for a in (workbuddy or {}).get("accounts") or []:
+            if not isinstance(a, dict):
+                continue
+            if str(a.get("credit_source") or "") in ("panel_credits", "billing_remain", "state_fallback"):
+                authoritative_uids.add(str(a.get("uid") or ""))
+        global_uids = {str(a.get("uid") or "") for a in (workbuddy or {}).get("accounts") or []
+                       if str(a.get("realm") or "").strip().lower() == "global"}
+        for uid, value in values.items():
+            if uid not in global_uids and uid not in authoritative_uids:
+                continue
+            old = old_values.get(uid)
+            old_credits = old.get("credits") if isinstance(old, dict) else old
+            if uid in old_values and isinstance(old_credits, (int, float)) and not isinstance(old_credits, bool) \
+                    and int(old_credits) == 0 and int(value.get("credits") or 0) > 0:
+                repaired[uid] = value
+        if not missing and not repaired:
             return 0
-        existing["values"] = {**old_values, **missing}
+        existing["values"] = {**old_values, **missing, **repaired}
         existing["source"] = existing.get("source") or source
         data[day] = existing
     else:
@@ -176,14 +240,15 @@ def _apply_wb_daily_cap(workbuddy, now_local):
             base_value = raw_value
             raw_source = record.get("source") if isinstance(record, dict) else None
             raw_captured_at = record.get("captured_at") if isinstance(record, dict) else None
-        if uid in values and _valid_credit(base_value):
+        is_global = str(entry.get("realm") or "").strip().lower() == "global"
+        if uid in values and _valid_credit(base_value) and not (is_global and int(base_value) <= 0):
             entry["daily_cap"] = int(base_value)
             entry["daily_cap_source"] = "lazy" if raw_source == "lazy" else "baseline"
             entry["daily_cap_effective_date"] = today
             entry["daily_cap_captured_at"] = raw_captured_at
             entry["daily_cap_timezone"] = record.get("timezone", "Asia/Shanghai")
             entry["daily_cap_record_source"] = raw_source
-        elif _valid_credit(entry.get("credits")):
+        elif _valid_credit(entry.get("credits")) and not (is_global and int(entry["credits"]) <= 0):
             entry["daily_cap"] = int(entry["credits"])
             entry["daily_cap_source"] = "seed"
             entry["daily_cap_effective_date"] = None
@@ -227,6 +292,96 @@ def _workbuddy_state_fallback(uids):
             if isinstance(credits, (int, float)) and not isinstance(credits, bool):
                 result[uid] = int(credits)
     return result
+
+
+# ── wan3：经 remote-nas 上的 workbuddy-manager 面板取数 ──────────────────
+# wan3 上游实例跑在 remote-nas（nas.example.com:7863），账号目录也在那台机器上。
+# 该目录曾用 NFS 挂进本机，但导出会抖动（导出列表为空 / root-squash 后
+# 0700 目录读不到），且 automount 被 docker 触发时挂载失败会直接拖住容器
+# 启动。因此改为**只走 HTTP**：账号清单仍取上游 /status（上游自己热加载
+# auths，5s 一轮），实时积分取面板代查腾讯的结果。
+_PANEL_CREDIT_CACHE = {"ts": 0.0, "value": None}
+_PANEL_WATCH_INTERVAL = float(os.environ.get("WORKBUDDY_PANEL_WATCH_INTERVAL", "60"))
+_panel_watch_state = {"ts": 0.0, "fingerprint": None}
+
+
+def _panel_json(path, token, timeout=25, data=None):
+    return _http_json(WORKBUDDY_WAN3_PANEL.rstrip("/") + path, token=token,
+                      extra_headers={"Accept": "application/json"},
+                      timeout=timeout, data=data)
+
+
+def _panel_wan3_credits():
+    """向面板查询 wan3 账号的实时积分，返回 {uid: credits}。
+
+    为什么要面板代查：真实余额只能拿账号的 accessToken 直连腾讯 billing 查，
+    而该 token 在 remote-nas 的 auths 文件里，本机已不再挂载该目录。面板本身能读
+    到该目录，也实现了同一个 billing 查询（server/services/tencent.py），
+    所以它是本机拿得到 wan3 真实余额的唯一通道。
+
+    用 force=false：命中面板自己的 60s 缓存时不重复打腾讯，避免把远端打热。
+    未配置面板或调用失败返回 {}，调用方保留 /status 原值（降级不报错）。
+    """
+    if not (WORKBUDDY_WAN3_PANEL and WORKBUDDY_WAN3_PANEL_TOKEN):
+        return {}
+    try:
+        payload = _panel_json("/api/accounts/refresh-credits?force=false",
+                              WORKBUDDY_WAN3_PANEL_TOKEN, data={})
+    except Exception:
+        return {}
+    credits = payload.get("credits") if isinstance(payload, dict) else None
+    if not isinstance(credits, dict):
+        return {}
+    out = {}
+    for uid, value in credits.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            out[str(uid)] = int(value)
+    return out
+
+
+def _panel_wan3_credits_cached():
+    """带缓存的面板积分查询。只缓存成功且非空的结果，失败下次重试。"""
+    import time as _time
+    now = _time.time()
+    cached = _PANEL_CREDIT_CACHE["value"]
+    if cached and now - _PANEL_CREDIT_CACHE["ts"] < _CREDIT_CACHE_TTL:
+        return cached
+    value = _panel_wan3_credits()
+    if value:
+        _PANEL_CREDIT_CACHE["ts"] = now
+        _PANEL_CREDIT_CACHE["value"] = value
+    return value
+
+
+def _panel_accounts_fingerprint():
+    """面板账号指纹，用于「加号后秒级可见」。
+
+    本机不再有 wan3 的 auths 目录，因此 wan3 的增删只能从面板看到。这里按
+    WORKBUDDY_PANEL_WATCH_INTERVAL（默认 60s）节流：本地轮询是 5s，但远端
+    接口没必要这么密。查询失败返回 None（调用方不把「暂时查不到」当变化）。
+    """
+    if not (WORKBUDDY_WAN3_PANEL and WORKBUDDY_WAN3_PANEL_TOKEN):
+        return None
+    import time as _time
+    now = _time.monotonic()
+    if (_panel_watch_state["fingerprint"] is not None
+            and now - _panel_watch_state["ts"] < _PANEL_WATCH_INTERVAL):
+        return _panel_watch_state["fingerprint"]
+    try:
+        payload = _panel_json("/api/accounts", WORKBUDDY_WAN3_PANEL_TOKEN, timeout=10)
+    except Exception:
+        return None
+    accounts = payload.get("accounts") if isinstance(payload, dict) else None
+    if not isinstance(accounts, list):
+        return None
+    parts = sorted(
+        "%s|%s" % (a.get("uid") or "", a.get("file") or "")
+        for a in accounts if isinstance(a, dict)
+    )
+    value = "\n".join(parts)
+    _panel_watch_state["ts"] = now
+    _panel_watch_state["fingerprint"] = value
+    return value
 
 
 def _workbuddy_credit():
@@ -319,6 +474,9 @@ def _groups():
     groups = (
         {"id": "default", "name": "默认出口", "base": WORKBUDDY_BASE, "config": WORKBUDDY_CONFIG},
         {"id": "wan1", "name": "WAN1 出口", "base": WORKBUDDY_WAN1_BASE, "config": WORKBUDDY_WAN1_CONFIG},
+        # wan3 上游实例跑在 remote-nas（nas.example.com:7863），账号目录与实时积分
+        # 都经面板 HTTP 获取（不再挂 NFS，见 _panel_wan3_credits）。
+        {"id": "wan3", "name": "WAN3 出口", "base": WORKBUDDY_WAN3_BASE, "config": WORKBUDDY_WAN3_CONFIG},
     )
     return tuple(group for group in groups if group["base"])
 
@@ -381,6 +539,8 @@ def collect():
 
         accounts_raw = payload.get("accounts") or []
         credit_map, credit_err = _workbuddy_credit_cached()
+        # wan3 的账号目录不在本机：实时积分改由面板代查（见 _panel_wan3_credits）。
+        panel_credits = _panel_wan3_credits_cached() if group["id"] == "wan3" else {}
         state_fallback = None
         if not credit_map:
             state_fallback = _workbuddy_state_fallback([a.get("uid") for a in accounts_raw if isinstance(a, dict)])
@@ -417,6 +577,11 @@ def collect():
             elif state_fallback and uid in state_fallback:
                 entry["credits"] = state_fallback[uid]
                 entry["credit_source"] = "state_fallback"
+            # 上游 /status 的 credits 对新账号常为 0（实例本地额度尚未同步），
+            # 用面板代查腾讯的真实余额兜底，避免前端显示 0 / 0。
+            if not entry.get("credits") and uid in panel_credits:
+                entry["credits"] = panel_credits[uid]
+                entry["credit_source"] = "panel_credits"
             norm.append(entry)
         norm.sort(key=lambda x: (x["disabled"], x["cooling"],
                                  -(x["credits"] if isinstance(x["credits"], (int, float)) else -1)))
@@ -646,3 +811,94 @@ def _apply_runtime_fields(account, fresh):
         if name in fresh:
             account[name] = fresh[name]
     account["disabled"] = bool(fresh.get("disabled")) or bool(fresh.get("manual_disabled"))
+
+
+# ── auths 目录监听：加/删账号后秒级重采 ──────────────────────────────
+# 背景：采集周期 600s，而账号是人工在 workbuddy-manager 里加的。加号后最坏要
+# 等 10 分钟卡片才出现。上游自己每 5s 轮询 auths 目录热加载（internal/pool/
+# watch.go），这里用同一套「目录指纹」口径在本后端也监听一次，指纹一变就立刻
+# 重跑采集并重算合并快照，把可见延迟从 600s 压到秒级。
+#
+# 为什么不用 fsnotify：与上游同一理由——容器/NFS 上会丢事件、句柄会耗尽；
+# 轮询只看目录内容指纹，漏不掉也不会抖。目录里只有几十个文件，开销可忽略。
+#
+# 为什么不用「面板加号后回调本服务」：那要改第三方 workbuddy-manager 镜像，
+# 后续它更新会被覆盖。本模块只读目录，不依赖任何外部回调。
+_ACCOUNT_WATCH_INTERVAL = float(os.environ.get("WORKBUDDY_WATCH_INTERVAL", "5"))
+_account_watch_state = {"fingerprint": None, "not_before": 0.0}
+_ACCOUNT_WATCH_LOCK = threading.Lock()
+# 重采最短间隔：指纹抖动（例如面板先写临时文件再原子改名）不该连着打好几轮上游。
+_ACCOUNT_WATCH_MIN_GAP = 3.0
+
+
+def _account_watch_fingerprint():
+    """账号指纹：本地 auths 目录（文件名+大小+mtime）+ 远端面板账号清单。
+
+    本地部分与上游 watch.go 同口径。wan3 的账号目录不在本机，改由面板账号
+    清单参与指纹（见 _panel_accounts_fingerprint），这样在 remote-nas 侧加号
+    也能触发重采，而不必等满 600s 采集周期。
+
+    本地目录整体不可读时返回 None，调用方保留旧指纹（不把「暂时读不到」当成
+    变化）。远端面板查不到时**只跳过该部分**，不影响本地变化的检测。
+    """
+    parts = []
+    for directory in _WORKBUDDY_AUTH_DIRS:
+        if not directory:
+            continue
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            return None
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                st = os.stat(os.path.join(directory, name))
+            except OSError:
+                continue
+            parts.append("%s|%s|%d|%d" % (directory, name, st.st_size, int(st.st_mtime)))
+    panel = _panel_accounts_fingerprint()
+    if panel:
+        parts.append("panel|wan3|" + panel)
+    return "\n".join(parts)
+
+
+def refresh_on_account_change():
+    """检查 auths 目录指纹；有变化则立即重采。返回是否触发了重采。
+
+    只做「一次检查 + 可能的采集」，供后台线程周期调用；任何异常都吞掉，
+    绝不能因为监听失败影响正常采集或接口。
+    """
+    try:
+        fingerprint = _account_watch_fingerprint()
+        if fingerprint is None:
+            return False
+        now = time.monotonic()
+        with _ACCOUNT_WATCH_LOCK:
+            previous = _account_watch_state["fingerprint"]
+            _account_watch_state["fingerprint"] = fingerprint
+            if previous is None or previous == fingerprint:
+                return False
+            if now < _account_watch_state["not_before"]:
+                return False
+            _account_watch_state["not_before"] = now + _ACCOUNT_WATCH_MIN_GAP
+        collect()
+        _refresh_combined_snapshot()
+        return True
+    except Exception:
+        return False
+
+
+def start_account_watch(stop_event, interval=None):
+    """启动 auths 目录监听线程，返回该线程（daemon）。"""
+    period = float(interval if interval is not None else _ACCOUNT_WATCH_INTERVAL)
+
+    def run():
+        while not stop_event.is_set():
+            refresh_on_account_change()
+            if stop_event.wait(period):
+                return
+
+    thread = threading.Thread(target=run, daemon=True, name="workbuddy-account-watch")
+    thread.start()
+    return thread

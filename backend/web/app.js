@@ -6,6 +6,11 @@
   var THEME_KEY = "nas_monitor_theme";
   var ACCENT_KEY = "nas_monitor_accent";
   var REFRESH_KEY = "nas_monitor_refresh";
+  var GATEWAY_TAB_KEY = "nas_monitor_gateway_tab";
+  var DISPLAY_FONT_KEY = "nas_monitor_display_font";
+  var DISPLAY_DENSITY_KEY = "nas_monitor_display_density";
+  var CARD_NUMBERS_KEY = "nas_monitor_card_numbers";
+  var OVERVIEW_ORDER_KEY = "nas_monitor_overview_order";
 
   var ACCENTS = [
     ["蓝", "#5B7CFA"], ["紫", "#8D51F9"], ["靛", "#3F51B5"],
@@ -42,11 +47,14 @@
   var cacheAt = {};
   var timers = {};
   var refreshing = false;
+  var refreshQueued = false;
+  var refreshRoute = "";
   // 后台刷新分级：网关探针约 650KB，不能随 10 秒轮询重复下载。
   var BACKGROUND_TTL = {
     overview: 15000, airport: 60000,
-    gwOverview: 60000, gwBalance: 15000, gwProbe: 60000,
+    gwOverview: 60000, gwPerformance: 120000, gwModelsMeta: 60000, gwBalance: 15000, gwProbe: 60000,
     gwAffinity: 60000, gwPolicy: 30000, gwTokens: 60000, gwLogs: 60000,
+    mihomoOverview: 30000, mihomoAirports: 30000,
     security: 30000, detail: 30000, router: 15000,
     trends: 60000, temperature: 60000, containers: 30000, cstats: 30000
   };
@@ -58,9 +66,40 @@
   function theme() { return localStorage.getItem(THEME_KEY) || "light"; }
   function accent() { return localStorage.getItem(ACCENT_KEY) || "#5B7CFA"; }
   function refreshSec() { var v = parseInt(localStorage.getItem(REFRESH_KEY) || "30", 10); return isNaN(v) ? 30 : v; }
+  function displayFont() {
+    var value = localStorage.getItem(DISPLAY_FONT_KEY) || "standard";
+    return ["standard", "large", "extra_large"].indexOf(value) >= 0 ? value : "standard";
+  }
+  function displayDensity() {
+    var value = localStorage.getItem(DISPLAY_DENSITY_KEY) || "visual";
+    return ["visual", "compact"].indexOf(value) >= 0 ? value : "visual";
+  }
+  function cardNumbers() { return localStorage.getItem(CARD_NUMBERS_KEY) !== "0"; }
+  function overviewOrder() {
+    try {
+      var value = JSON.parse(localStorage.getItem(OVERVIEW_ORDER_KEY) || "[]");
+      return Array.isArray(value) ? value.filter(function (id) { return typeof id === "string"; }) : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  var DEFAULT_OVERVIEW_ORDER = ["nas", "aliyun", "tencent", "router", "airport", "alerts"];
+
+  function orderedOverviewIds() {
+    var order = overviewOrder();
+    var merged = order.filter(function (id) { return DEFAULT_OVERVIEW_ORDER.indexOf(id) >= 0; });
+    DEFAULT_OVERVIEW_ORDER.forEach(function (id) {
+      if (merged.indexOf(id) < 0) merged.push(id);
+    });
+    return merged;
+  }
 
   function applyTheme() {
     document.documentElement.setAttribute("data-theme", theme());
+    document.documentElement.setAttribute("data-font-size", displayFont());
+    document.documentElement.setAttribute("data-density", displayDensity());
+    document.documentElement.classList.toggle("hide-card-numbers", !cardNumbers());
     document.documentElement.style.setProperty("--accent", accent());
     document.documentElement.style.setProperty("--accent-soft", hexA(accent(), .14));
   }
@@ -191,6 +230,14 @@
 
   function card(inner, cls) { return '<div class="card ' + (cls || "") + '">' + inner + '</div>'; }
 
+  function uiSection(title, summary, key, detail, defaultOpen) {
+    var open = ui.sections[key] === undefined ? !!defaultOpen : !!ui.sections[key];
+    return card('<div class="row between"><span class="card-title">' + esc(title) + '</span>' +
+      '<button class="btn small" data-ui-expand="' + esc(key) + '">' + (open ? "收起" : "展开") + '</button></div>' +
+      '<div class="mt-2">' + summary + '</div>' +
+      (open ? '<div class="ui-section-detail mt-3">' + detail() + '</div>' : ""));
+  }
+
   function usageTile(label, value) {
     var v = Number(value) || 0;
     return '<div class="tile" style="background:' + usageSoft(v) + '">' +
@@ -201,7 +248,7 @@
   }
 
   function netTile(tx, rx) {
-    return '<div class="tile">' +
+    return '<div class="tile tint">' +
       '<div class="k mb-1">网络</div>' +
       '<div class="net">↓ ' + esc(rx) + '</div>' +
       '<div class="net mt-1">↑ ' + esc(tx) + '</div>' +
@@ -317,11 +364,68 @@
   }
   function go(route) { location.hash = "#/" + route; }
 
+  var SUBTABS = {
+    overview: [
+      ["overview", "总览"], ["nas", "NAS"], ["aliyun", "阿里云"], ["tencent", "腾讯云"]
+    ],
+    gateway: [
+      ["gateway", "概览"], ["gateway/performance", "性能"], ["gateway/logs", "日志"],
+      ["gateway/channels", "渠道"], ["gateway/models", "模型"], ["gateway/proxy", "代理"]
+    ],
+    tools: [
+      ["tools", "工具"], ["tools/downloader", "下载器"], ["ask", "知识问答"], ["knowledge-archive", "知识归档"]
+    ],
+    security: [
+      ["security", "NAS"], ["security/aliyun", "阿里云"], ["security/tencent", "腾讯云"]
+    ],
+    settings: [
+      ["settings", "外观"], ["settings/display", "显示"], ["settings/data", "连接与数据"]
+    ]
+  };
+
+  function primaryTabKey(route) {
+    var root = route.split("/")[0];
+    if (root === "overview" || root === "nas" || root === "aliyun" || root === "tencent" ||
+        root === "trends" || root === "temperature" || root === "containers" ||
+        root === "services" || root === "disks" || root === "router") return "overview";
+    if (root === "tools" || root === "ask" || root === "knowledge-archive") return "tools";
+    return ROUTES.some(function (item) { return item[0] === root; }) ? root : "overview";
+  }
+
+  function ownerRouteKey(route) {
+    var root = primaryTabKey(route);
+    if (root === "overview") {
+      var child = route.split("/")[0];
+      if (child === "nas" || child === "aliyun" || child === "tencent") return child;
+      if (child === "router" || child === "disks") return "overview";
+      if (child === "trends" || child === "temperature" || child === "containers" ||
+          child === "services" || child === "router") {
+        var childHost = route.split("/")[1];
+        if (childHost === "nas" || childHost === "aliyun" || childHost === "tencent") {
+          return childHost;
+        }
+      }
+    }
+    return route;
+  }
+
+  function renderSubtabs(route) {
+    var box = document.getElementById("subtabs");
+    var root = primaryTabKey(route);
+    var items = SUBTABS[root];
+    if (!items) { box.innerHTML = ""; return; }
+    var key = ownerRouteKey(route);
+    box.innerHTML = '<div class="subnav" role="tablist" aria-label="页面标签">' +
+      items.map(function (item) {
+        var active = item[0] === key;
+        return '<a role="tab" aria-selected="' + (active ? "true" : "false") + '" class="' + (active ? "active" : "") +
+          '" href="#/' + item[0] + '">' + esc(item[1]) + '</a>';
+      }).join("") + '</div>';
+  }
+
   function renderNav() {
-    var cur = currentRoute().split("/")[0];
-    var mainRoutes = ROUTES.map(function (r) { return r[0]; });
+    var cur = primaryTabKey(currentRoute());
     var nav = document.getElementById("nav");
-    if (mainRoutes.indexOf(cur) === -1) { nav.innerHTML = ""; return; }
     nav.innerHTML = '<div class="nav-inner">' + ROUTES.map(function (r) {
       return '<a href="#/' + r[0] + '" class="' + (cur === r[0] ? "active" : "") + '">' +
         icon(r[2], 17) + '<span>' + r[1] + '</span></a>';
@@ -334,7 +438,7 @@
     if (!hostData) return "";
     var online = hostData.status === "up";
     var net = hostData.network || {};
-    return '<div id="card-host-' + hostId + '" class="card click" data-go="' + hostId + '">' +
+    return '<div id="card-host-' + hostId + '" class="card click overview-card" data-overview-card="' + hostId + '" data-go="' + hostId + '">' +
       '<div class="row">' +
       '<div class="icon-badge">' +
       icon("server", 19) + '</div>' +
@@ -398,7 +502,7 @@
         '<span class="amber-text">↑' + rateShort(w.upload_speed) + '</span>' +
         '</div>';
     }).join("");
-    return '<div id="card-router" class="card click" data-go="router">' +
+    return '<div id="card-router" class="card click overview-card" data-overview-card="router" data-go="router">' +
       '<div class="row gap-2">' +
       '<div class="icon-badge">' +
       icon("gateway", 19) + '</div>' +
@@ -412,12 +516,16 @@
       '<div class="row gap-3">' + gauge(r.cpu_usage, "CPU") + gauge(r.mem_usage, "内存") +
       '<div class="gauge"><div class="gv ' + (r.cpu_temp > 70 ? "red-text" : "amber-text") + '">' +
       (r.cpu_temp > 0 ? r.cpu_temp + "°C" : "---") + '</div><div class="k tiny muted">温度</div></div>' +
-      '</div>' + wans + '</div>';
+      '</div>' +
+      (wans ? '<div class="legend-row tiny subtle">' +
+        '<span class="grow">WAN 实时速率</span>' +
+        '<span class="green-text">↓ 下载</span>' +
+        '<span class="amber-text">↑ 上传</span></div>' : '') + wans + '</div>';
   }
 
   function airportCard(items) {
     if (!items || !items.length) return "";
-    return card(
+    return '<div id="card-airport" class="card overview-card" data-overview-card="airport">' +
       '<div class="row"><span class="accent-text">' + icon("tools", 17) + '</span>' +
       '<span class="card-title ml-2">机场流量</span>' +
       '<span class="grow"></span><span class="tiny subtle">订阅快照</span></div>' +
@@ -425,16 +533,15 @@
       items.map(function (it, idx) {
         var c = it.level === "critical" ? "var(--red)" : it.level === "warning" ? "var(--amber)" : "var(--green)";
         return '<div class="' + (idx ? "mt-3" : "") + '">' +
-          '<div class="row between"><span class="font-medium text-body">' + esc(it.name) + '</span>' +
-          '<span class="text-xs font-bold" style="color:' + c + '">' +
-          (Math.round(it.remaining_gb * 10) / 10) + " / " + Math.round(it.total_gb) + ' GB</span></div>' +
+          '<div class="row between baseline"><span class="font-medium text-body">' + esc(it.name) + '</span>' +
+          '<span class="num-main" style="color:' + c + '">' +
+          (Math.round(it.remaining_gb * 10) / 10) + '<span class="num-unit"> / ' + Math.round(it.total_gb) + ' GB</span></span></div>' +
           '<div class="bar tall"><i style="width:' + Math.max(0, Math.min(100, 100 - it.used_percent)) +
           '%;background:' + c + '"></i></div>' +
           '<div class="tiny subtle mt-1">已用 ' + Math.round(it.used_percent) + '% · 重置 ' +
           (it.reset_days != null ? it.reset_days + "天" : "-") + ' · ' + esc(it.expire || "-") + '</div>' +
           '</div>';
-      }).join("")
-    );
+      }).join("") + '</div>';
   }
 
   function renderOverview() {
@@ -442,7 +549,7 @@
     if (!ov) return renderLoading("正在采集服务器数据…");
     var alerts = ov.alerts || [];
     var crit = alerts.filter(function (a) { return a.level === "critical"; }).length;
-    var summary = '<div id="card-alerts" class="card alert-summary ' + (crit ? "bg-red-soft" : alerts.length ? "bg-amber-soft" : "bg-green-soft") + '">' +
+    var summary = '<div id="card-alerts" data-overview-card="alerts" class="card overview-card alert-summary ' + (crit ? "bg-red-soft" : alerts.length ? "bg-amber-soft" : "bg-green-soft") + '">' +
       '<div class="row">' +
       '<span style="color:' + (crit ? "var(--red)" : alerts.length ? "var(--amber)" : "var(--green)") + '">' + icon("alert", 18) + '</span>' +
       '<div class="grow ml-2">' +
@@ -452,14 +559,40 @@
       '<button class="btn small" data-go="alerts">查看</button>' +
       '</div></div>';
 
-    return summary +
-      '<div class="grid host-grid">' +
-      Object.keys(HOST_LABEL).map(function (id) { return hostCard(HOST_LABEL[id], ov[id], id); }).join("") +
-      '</div>' +
-      routerCard(ov.router) +
-      airportCard((cache.airport || {}).items) +
+    var cards = {
+      alerts: summary,
+      nas: hostCard(HOST_LABEL.nas, ov.nas, "nas"),
+      aliyun: hostCard(HOST_LABEL.aliyun, ov.aliyun, "aliyun"),
+      tencent: hostCard(HOST_LABEL.tencent, ov.tencent, "tencent"),
+      router: routerCard(ov.router),
+      airport: airportCard((cache.airport || {}).items)
+    };
+    var workbench = orderedOverviewIds().map(function (id) { return cards[id] || ""; }).join("");
+    return '<div class="overview-workbench">' + workbench + '</div>' +
       '<div class="footer-note">数据自 ' + esc(ago(ov.timestamp)) + '更新' +
-      (refreshSec() > 0 ? ' · 每 ' + refreshSec() + ' 秒自动刷新' : '') + '</div>';
+      (refreshSec() > 0 ? ' · 每 ' + refreshSec() + ' 秒自动刷新' : '') + '</div>' +
+      (cache.airport && (cache.airport.items || []).length
+        ? orderHint()
+        : '<div class="warnbox mt-3">机场流量数据尚未就绪，稍后刷新可继续加载。</div>');
+  }
+
+  function orderHint() {
+    return '<div class="tiny subtle mt-2">卡片编号与排序可在「设置 → 显示」中调整。</div>';
+  }
+
+  function overviewDetail(ov, alerts) {
+    var hosts = Object.keys(HOST_LABEL).map(function (id) { return ov[id]; }).filter(Boolean);
+    var online = hosts.filter(function (host) { return host.status === "up"; }).length;
+    var maxDisk = 0;
+    hosts.forEach(function (host) {
+      (host.disks || []).forEach(function (disk) { maxDisk = Math.max(maxDisk, Number(disk.percent) || 0); });
+    });
+    return card('<div class="card-title">运行概览</div>' +
+      '<div class="detail-stat"><span>主机在线</span><strong>' + online + ' / ' + hosts.length + '</strong></div>' +
+      '<div class="detail-stat"><span>待处理告警</span><strong class="' + (alerts.length ? "red-text" : "green-text") + '">' + alerts.length + '</strong></div>' +
+      '<div class="detail-stat"><span>最高磁盘占用</span><strong class="' + (maxDisk >= 90 ? "red-text" : maxDisk >= 75 ? "amber-text" : "green-text") + '">' + Math.round(maxDisk) + '%</strong></div>' +
+      '<div class="detail-stat"><span>最近更新</span><strong>' + esc(ago(ov.timestamp)) + '</strong></div>' +
+      '<div class="detail-note">选择左侧卡片可进入详情、趋势、容器与服务。</div>', "detail-card");
   }
 
   /* ───────────── 页面：告警 ───────────── */
@@ -467,7 +600,10 @@
   function renderAlerts() {
     var ov = cache.overview;
     if (!ov) return renderLoading("正在加载告警…");
-    var alerts = ov.alerts || [];
+    var alerts = (ov.alerts || []).slice().sort(function (a, b) {
+      if (a.level === b.level) return String(a.first_seen || "").localeCompare(String(b.first_seen || ""));
+      return a.level === "critical" ? -1 : 1;
+    });
     if (!alerts.length) {
       return card('<div class="empty"><div class="big green-text">' + icon("check", 40) + '</div>' +
         '<div class="font-semibold green-text">当前没有需要处理的告警</div>' +
@@ -496,22 +632,22 @@
   /* ───────────── 页面：网关 ───────────── */
 
   /* ── 网关页 Tab 定义（与 Android gatewayNavItems 对齐） ── */
-  var GATEWAY_TABS = ["概览", "性能", "日志", "渠道", "模型"];
+  var GATEWAY_TABS = ["概览", "性能", "日志", "渠道", "模型", "代理"];
   var ui = window._ui = window._ui || {};
   function gatewayTab() {
-    var t = parseInt(localStorage.getItem("nas_gateway_tab") || "0", 10);
-    return (isNaN(t) || t < 0 || t > 4) ? 0 : t;
+    var slug = currentRoute().split("/")[1];
+    var routeTabs = { performance: 1, logs: 2, channels: 3, models: 4, proxy: 5 };
+    if (slug in routeTabs) return routeTabs[slug];
+    var t = parseInt(localStorage.getItem(GATEWAY_TAB_KEY) || "0", 10);
+    return (isNaN(t) || t < 0 || t > 5) ? 0 : t;
   }
 
   function renderGateway() {
     var gw = cache.gwOverview, bal = cache.gwBalance;
     if (!gw && !bal) return renderLoading("正在加载网关数据…");
     var tab = gatewayTab();
-    var tabBar = '<div class="tabs">' + GATEWAY_TABS.map(function (label, i) {
-      return '<button class="' + (i === tab ? "active" : "") + '" data-gwtab="' + i + '">' + label + '</button>';
-    }).join("") + '</div>';
-    var bodyFns = [renderGwOverview, renderGwPerf, renderGwLogs, renderGwChannels, renderGwModels];
-    return tabBar + (bodyFns[tab] || renderGwOverview)();
+    var bodyFns = [renderGwOverview, renderGwPerf, renderGwLogs, renderGwChannels, renderGwModels, renderGwProxy];
+    return (bodyFns[tab] || renderGwOverview)();
   }
 
   /* ── Tab 1: 概览 ── */
@@ -519,25 +655,34 @@
     var gw = cache.gwOverview, bal = cache.gwBalance, probe = cache.gwProbe;
     var out = "";
     if (gw) {
-      var models = gw.models || [];
-      var sumReq = models.reduce(function (s, m) { return s + (m.requests || 0); }, 0);
-      var sumOk = models.reduce(function (s, m) { return s + (m.success || 0); }, 0);
-      var rate = sumReq ? (sumOk / sumReq * 100) : 0;
-      out += card('<div class="row between"><span class="card-title">整体成功率</span>' +
-        '<span class="font-semibold text-body" style="color:' + usageColor(100 - rate) + '">' + rate.toFixed(1) + '%</span></div>' +
-        '<div class="bar bar-2xs"><i style="width:' + rate.toFixed(1) + '%;background:var(--green)"></i></div>' +
-        '<div class="spacer-h"></div>' +
-        '<div class="tile-grid">' +
-        '<div class="tile"><div class="v">' + (gw.recent_requests || 0) + '</div><div class="k">24h 请求</div></div>' +
+      var req24 = (gw.requests_24h != null ? gw.requests_24h : gw.recent_requests) || 0;
+      out += card(
+        '<div class="tile-grid cols-4">' +
+        '<div class="tile"><div class="v">' + req24 + '</div><div class="k">24h 请求</div></div>' +
         '<div class="tile"><div class="v amber-text">' + (gw.disabled_channels || 0) + '</div><div class="k">停用渠道</div></div>' +
         '<div class="tile"><div class="v red-text">' + (gw.auto_banned_channels || 0) + '</div><div class="k">自动封禁</div></div>' +
+        '<div class="tile"><div class="v accent-text">' + (gw.rpm != null ? gw.rpm : "--") + '</div><div class="k">RPM</div></div>' +
         '</div>');
     }
+    var summary = "";
     if (bal) {
-      out += renderGwBalance(bal);
+      summary += '<div class="row between"><span class="font-medium">渠道余额</span>' +
+        '<span class="font-semibold">$' + (bal.total != null ? bal.total.toFixed(2) : "--") + '</span></div>' +
+        '<div class="tiny subtle mt-1">' + ((bal.channels || []).length) + ' 个渠道 · 更新于 ' +
+        esc(bal.updated_at || "--") + '</div>';
     }
     if (probe) {
-      out += renderGwProbe(probe);
+      var ps = probe.summary || {};
+      summary += '<div class="row between mt-3"><span class="font-medium">探针状态</span>' +
+        '<span class="pill ' + (probe.probe_status === "ok" ? "on" : probe.probe_status === "degraded" ? "warn" : "off") + '">' +
+        esc(probe.probe_status) + '</span></div>' +
+        '<div class="tiny subtle mt-1">健康 ' + n(ps.healthy, 0) + ' · 降级 ' + n(ps.degraded, 0) +
+        ' · 失败 ' + n(ps.failed, 0) + '</div>';
+    }
+    if (summary) {
+      out += uiSection("网关补充状态", summary, "gw-overview-more", function () {
+        return (bal ? renderGwBalance(bal) : "") + (probe ? renderGwProbe(probe) : "");
+      });
     }
     return out;
   }
@@ -590,8 +735,11 @@
   /* ── Tab 3: 日志 ── */
   function renderGwLogs() {
     var logs = cache.gwLogs;
+    var items = (logs && logs.items) || [];
+    var shown = ui.logsExpanded ? items : items.slice(0, 8);
+    var hidden = items.length - shown.length;
     return card('<div class="row between"><span class="card-title">调用日志</span>' +
-      (logs ? '<span class="tiny subtle">第 ' + (logs.page || 0) + ' 页 · 共 ' + (logs.total || 0) + '</span>' : '') + '</div>' +
+      (logs ? '<span class="tiny subtle">第 ' + Math.max(1, logs.page || 1) + ' 页 · 共 ' + (logs.total || 0) + ' 条</span>' : '') + '</div>' +
       '<div class="spacer-h"></div>' +
       '<div class="row gap-2 mb-3 wrap-flex">' +
       '<button class="btn small" data-logs-page="0">最新</button>' +
@@ -599,9 +747,9 @@
         return '<button class="chip logs-token" data-token="' + esc(t) + '">' + esc(t) + '</button>';
       }).join("") +
       '</div>' +
-      (logs && (logs.items || []).length ? '<div class="scroll-x"><table><thead><tr>' +
+      (items.length ? '<div class="scroll-x"><table><thead><tr>' +
         '<th>时间</th><th>模型</th><th>渠道</th><th>令牌</th><th>推理</th><th class="num">耗时</th><th>结果</th><th class="num">tokens</th>' +
-        '</tr></thead><tbody>' + logs.items.map(function (l) {
+        '</tr></thead><tbody>' + shown.map(function (l) {
           var ok = l.outcome === "success";
           var c = ok ? "g" : l.outcome === "client_cancelled" ? "a" : "r";
           var ts = l.created_at ? new Date(l.created_at * 1000).toLocaleString("zh-CN", { hour12: false }) : "--";
@@ -616,10 +764,14 @@
             '<td><span class="dot ' + c + '"></span> ' + esc(l.outcome) + '</td>' +
             '<td class="num tiny">' + ((l.prompt_tokens || 0) + (l.completion_tokens || 0)) + '</td></tr>';
         }).join("") + '</tbody></table></div>' +
-      (logs && logs.total > 30 ? '<div class="row between mt-3"><span class="tiny subtle">第 ' + (logs.page || 0) + ' 页 · 共 ' + logs.total + ' 条</span>' +
+      (hidden > 0 ? '<div class="row between mt-3"><span class="tiny subtle">本页显示最新 ' + shown.length +
+        ' / ' + items.length + ' 条</span><button class="btn small" data-logs-expand="1">显示本页全部</button></div>' : '') +
+      (ui.logsExpanded ? '<div class="row between mt-3"><span class="tiny subtle">已显示本页 ' + shown.length +
+        ' 条</span><button class="btn small" data-logs-expand="0">收起</button></div>' : '') +
+      (logs && logs.total > 30 ? '<div class="row between mt-3"><span class="tiny subtle">第 ' + Math.max(1, logs.page || 1) + ' 页 · 共 ' + logs.total + ' 条</span>' +
         '<div class="row gap-2">' +
-        ((logs.page || 0) > 0 ? '<button class="btn small" data-logs-page="' + ((logs.page || 0) - 1) + '">上一页</button>' : '') +
-        '<button class="btn small" data-logs-page="' + ((logs.page || 0) + 1) + '">下一页</button>' +
+        (Math.max(1, logs.page || 1) > 1 ? '<button class="btn small" data-logs-page="' + (Math.max(1, logs.page || 1) - 1) + '">上一页</button>' : '') +
+        '<button class="btn small" data-logs-page="' + (Math.max(1, logs.page || 1) + 1) + '">下一页</button>' +
         '</div></div>' : '')
       : '<div class="empty caption">暂无日志</div>'));
   }
@@ -629,17 +781,28 @@
     var gw = cache.gwOverview, bal = cache.gwBalance;
     var out = "";
     if (gw && (gw.channels || []).length) {
-      out += card('<div class="card-title">渠道（' + gw.channels.length + '）</div><div class="spacer-h"></div><div class="scroll-x"><table>' +
-        '<thead><tr><th>ID</th><th>名称</th><th>模型</th><th class="num">响应</th><th>状态</th><th></th></tr></thead><tbody>' +
-        gw.channels.map(function (c) {
+      var channels = ui.channelsExpanded ? gw.channels : gw.channels.slice(0, 6);
+      out += card('<div class="card-title">渠道（' + gw.channels.length + '）</div><div class="spacer-h"></div>' +
+        '<div class="channel-grid">' +
+        channels.map(function (c) {
           var enabled = c.status === 1;
-          return '<tr><td class="num">' + c.id + '</td><td class="wrap-text">' + esc(c.name) + '</td>' +
-            '<td class="tiny muted wrap-text max-w-280">' + esc(c.models) + '</td>' +
-            '<td class="num">' + (c.response_time ? (c.response_time / 1000).toFixed(1) + "s" : "--") + '</td>' +
-            '<td><span class="pill ' + (enabled ? "on" : "neutral") + '">' + (enabled ? "启用" : "停用") + '</span></td>' +
-            '<td><button class="btn small ch-toggle" data-id="' + c.id + '" data-status="' + (enabled ? 2 : 1) + '">' +
-            (enabled ? "停用" : "启用") + '</button></td></tr>';
-        }).join("") + '</tbody></table></div>');
+          var modelsOpen = !!ui.channelModels[c.id];
+          return '<div class="channel-item">' +
+            '<div class="row between gap-2"><span class="row gap-2 grow"><span class="card-number">' + c.id + '</span>' +
+            '<span class="font-medium wrap-text">' + esc(c.name) + '</span></span>' +
+            '<span class="pill ' + (enabled ? "on" : "neutral") + '">' + (enabled ? "启用" : "停用") + '</span></div>' +
+            '<div class="channel-models ' + (modelsOpen ? "" : "clamped") + '">' + esc(c.models) + '</div>' +
+            '<button class="channel-models-toggle" data-channel-models="' + c.id + '">' +
+            (modelsOpen ? "收起模型" : "展开模型") + '</button>' +
+            '<div class="row between mt-2"><span class="tiny subtle">响应 ' +
+            (c.response_time ? (c.response_time / 1000).toFixed(1) + "s" : "--") + '</span>' +
+            '<button class="btn small ch-toggle" data-id="' + c.id + '" data-status="' + (enabled ? 2 : 1) + '">' +
+            (enabled ? "停用" : "启用") + '</button></div></div>';
+        }).join("") + '</div>' +
+        (gw.channels.length > 6 ? '<div class="row between mt-3"><span class="tiny subtle">' +
+          (ui.channelsExpanded ? '已显示全部 ' + gw.channels.length : '显示前 6 / 共 ' + gw.channels.length) +
+          ' 个渠道</span><button class="btn small" data-channels-expand="' +
+          (ui.channelsExpanded ? '0' : '1') + '">' + (ui.channelsExpanded ? '收起' : '显示全部') + '</button></div>' : ''));
     }
     if (bal) out += renderGwBalance(bal);
     if (!out) return '<div class="empty caption">暂无渠道数据</div>';
@@ -648,11 +811,34 @@
 
   /* ── Tab 5: 模型 ── */
   function renderGwModels() {
-    var gw = cache.gwOverview, probe = cache.gwProbe;
+    var perf = cache.gwPerformance, probe = cache.gwProbe, meta = cache.gwModelsMeta;
     var out = "";
-    if (gw && (gw.models || []).length) {
-      var models = gw.models;
-      var worst = models.slice().sort(function (a, b) { return (a.success_rate || 0) - (b.success_rate || 0); }).slice(0, 8);
+    // 常用模型：启用中的模型；24h 有调用的排前并显示调用量。
+    var usage = {};
+    ((perf && perf.models) || []).forEach(function (m) { usage[m.model] = m.requests || 0; });
+    var common = (((meta && meta.items) || []).filter(function (m) {
+      return m.status === 1 || usage[m.model_name] > 0;
+    })).sort(function (a, b) {
+      return (usage[b.model_name] || 0) - (usage[a.model_name] || 0) || b.status - a.status;
+    });
+    if (common.length) {
+      out += card('<div class="card-title">常用模型</div><div class="spacer-h"></div>' +
+        '<div class="tiny subtle mb-3">此开关只更新模型目录状态，不会从 /v1/models 隐藏，也不阻止实际调用。</div>' +
+        common.map(function (m) {
+          var enabled = m.status === 1;
+          var used = usage[m.model_name] || 0;
+          return '<div class="row between mb-3">' +
+            '<div class="grow"><div class="font-medium wrap-text">' + esc(m.model_name) + '</div>' +
+            '<div class="tiny subtle">' + (enabled ? "已启用" : "已禁用") +
+            (used > 0 ? ' · 24h ' + used + ' 次' : '') + '</div></div>' +
+            '<button class="btn small ' + (enabled ? "danger" : "") + ' model-toggle" data-id="' + m.id +
+            '" data-status="' + (enabled ? 0 : 1) + '">' + (enabled ? "禁用" : "启用") + '</button></div>';
+        }).join(""));
+    }
+    if (perf && (perf.models || []).length) {
+      var models = perf.models;
+      var sorted = models.slice().sort(function (a, b) { return (a.success_rate || 0) - (b.success_rate || 0); });
+      var worst = (ui.modelsExpanded ? sorted : sorted.slice(0, 5));
       var maxReq = Math.max.apply(null, worst.map(function (m) { return m.requests || 0; })) || 1;
       out += card('<div class="card-title">模型表现（按成功率升序）</div><div class="spacer-h"></div>' +
         worst.map(function (m) {
@@ -665,11 +851,119 @@
             ' · 失败 ' + (m.failed || 0) + ' · 客户端取消 ' + (m.client_cancelled || 0) +
             (m.avg_use_time ? ' · 平均 ' + (m.avg_use_time / 1000).toFixed(1) + 's' : '') + '</div>' +
             '</div>';
-        }).join(""));
+        }).join("") +
+        (sorted.length > 5 ? '<div class="row between mt-3"><span class="tiny subtle">' +
+          (ui.modelsExpanded ? '已显示全部 ' + sorted.length : '显示表现最弱的 5 / ' + sorted.length) +
+          ' 个模型</span><button class="btn small" data-models-expand="' +
+          (ui.modelsExpanded ? '0' : '1') + '">' + (ui.modelsExpanded ? '收起' : '显示更多') + '</button></div>' : ''));
     }
     if (probe) out += renderGwProbe(probe);
     if (!out) return '<div class="empty caption">暂无模型数据</div>';
     return out;
+  }
+
+  /* ── Tab 6: Mihomo 代理 ── */
+  function renderGwProxy() {
+    var overview = cache.mihomoOverview;
+    var airports = cache.mihomoAirports;
+    if (!overview && !airports) return renderLoading("正在读取 Mihomo 代理状态…");
+    var instances = (overview && overview.instances) || [];
+    var activeId = ui.mihomoInstance;
+    if (!activeId || !instances.some(function (item) { return item.id === activeId; })) {
+      activeId = (instances[0] && instances[0].id) || "core";
+    }
+    var instance = instances.find(function (item) { return item.id === activeId; });
+    var airport = ((airports && airports.instances) || []).find(function (item) { return item.id === activeId; });
+    var out = '<div class="proxy-instance-tabs">' + instances.map(function (item) {
+      return '<button class="chip ' + (item.id === activeId ? "active" : "") +
+        '" data-mihomo-instance="' + esc(item.id) + '">' + esc(item.name || item.id) + '</button>';
+    }).join("") + '</div>';
+    if (!instance) return out + '<div class="warnbox">代理实例暂时不可用</div>';
+    if (instance.available === false) {
+      return out + '<div class="warnbox">' + esc(instance.error || "该实例暂时不可达") + '</div>';
+    }
+    out += card('<div class="row between"><span class="card-title">Mihomo ' + esc(instance.version || "--") + '</span>' +
+      '<button class="btn small" data-mihomo-panel="1">管理面板</button></div>' +
+      '<div class="caption muted mt-1">' + esc(instance.mode || "--") + ' · 混合端口 ' + esc(instance.mixed_port || "--") + '</div>' +
+      '<div class="proxy-metrics mt-3">' +
+      '<div class="tile"><div class="v">' + n(instance.connections, 0) + '</div><div class="k">连接</div></div>' +
+      '<div class="tile"><div class="v green-text">' + rateShort(instance.download_speed) + '</div><div class="k">下行</div></div>' +
+      '<div class="tile"><div class="v amber-text">' + rateShort(instance.upload_speed) + '</div><div class="k">上行</div></div>' +
+      '</div>');
+    var groups = instance.groups || [];
+    var selectors = groups.filter(function (group) { return group.type === "Selector"; });
+    var mobile = window.matchMedia("(max-width: 560px)").matches;
+    var visibleSelectors = mobile && !ui.proxyGroupsExpanded ? selectors.slice(0, 6) : selectors;
+    var groupSummary = '<div class="row between"><span class="font-medium">首个策略组</span>' +
+      '<span class="tiny accent-text">' + esc((selectors[0] && selectors[0].now) || "-") + '</span></div>' +
+      '<div class="tiny subtle mt-1">' + selectors.length + ' 个 Selector 策略组</div>';
+    var groupDetail = '<div class="row between"><span class="card-title">策略组</span>' +
+      '<span class="tiny subtle">' + selectors.length + ' 个可切换</span></div><div class="spacer-h"></div>' +
+      (selectors.length ? visibleSelectors.map(function (group) {
+          var openKey = activeId + ":" + group.name;
+          var open = !!ui.proxyGroups[openKey];
+          return '<div class="proxy-group">' +
+            '<button class="proxy-group-head" data-mihomo-group="' + esc(group.name) + '">' +
+            '<span class="grow"><span class="font-medium wrap-text">' + esc(group.name) + '</span>' +
+            '<span class="tiny subtle wrap-text">' + esc(group.type) + ' · 当前 ' + esc(group.now || "-") + '</span></span>' +
+            '<span class="tiny accent-text proxy-toggle">' + (open ? "收起" : "切换") + '</span></button>' +
+            (open ? '<div class="proxy-nodes">' + (group.all || []).map(function (target) {
+              var current = target === group.now;
+              return '<button class="proxy-node ' + (current ? "current" : "") + '" data-mihomo-select="' +
+                esc(group.name) + '" data-mihomo-target="' + esc(target) + '"' + (current ? " disabled" : "") + '>' +
+                '<span class="wrap-text">' + esc(target) + '</span>' +
+                (current ? '<span class="tiny accent-text">当前</span>' : '') + '</button>';
+            }).join("") + '</div>' : '') + '</div>';
+        }).join("") +
+        (mobile && selectors.length > visibleSelectors.length
+          ? '<div class="row between mt-3"><span class="tiny subtle">显示前 ' + visibleSelectors.length +
+            ' / ' + selectors.length + ' 个策略组</span><button class="btn small" data-proxy-expand="1">显示全部</button></div>'
+          : mobile && ui.proxyGroupsExpanded && selectors.length > 6
+            ? '<div class="row between mt-3"><span class="tiny subtle">已显示全部 ' + selectors.length +
+              ' 个策略组</span><button class="btn small" data-proxy-expand="0">收起</button></div>'
+            : '')
+        : '<div class="empty caption">暂无 Selector 策略组</div>');
+    var airportSummary = airport && (airport.items || []).length
+      ? '<div class="row between"><span class="font-medium">机场流量</span><span class="tiny subtle">' +
+        (airport.items || []).length + ' 组</span></div><div class="tiny subtle mt-1">' +
+        esc((airport.items[0] || {}).name || "-") + ' · 剩余 ' +
+        (Math.round(((airport.items[0] || {}).remaining_gb || 0) * 10) / 10) + ' GB</div>'
+      : '<div class="tiny subtle">' + esc((airport && airport.error) || "暂无机场流量数据") + '</div>';
+    out += '<div class="proxy-layout">' +
+      uiSection("策略组", groupSummary, "proxy-groups-" + activeId, function () { return groupDetail; }, true) +
+      uiSection("机场看板", airportSummary, "proxy-airport-" + activeId, function () { return renderMihomoAirport(airport); }, true) +
+      '</div>';
+    return out;
+  }
+
+  function renderMihomoAirport(instance) {
+    if (!instance || !(instance.items || []).length) {
+      return card('<div class="card-title">机场看板</div><div class="empty caption">' +
+        esc((instance && instance.error) || "暂无机场流量数据") + '</div>');
+    }
+    return card('<div class="row between"><span class="card-title">机场看板</span>' +
+      '<span class="tiny subtle">每 ' + n(instance.history_seconds, 5) + ' 秒采样</span></div><div class="spacer-h"></div>' +
+      instance.items.map(function (item) {
+        var color = item.level === "critical" ? "var(--red)" : item.level === "warning" ? "var(--amber)" : "var(--green)";
+        return '<div class="mb-3"><div class="row between baseline"><span class="font-medium wrap-text">' + esc(item.name) + '</span>' +
+          '<span class="tiny" style="color:' + color + '">' + (Math.round((item.remaining_gb || 0) * 10) / 10) + ' / ' +
+          Math.round(item.total_gb || 0) + ' GB</span></div>' +
+          '<div class="bar"><i style="width:' + Math.max(0, Math.min(100, 100 - (item.used_percent || 0))) +
+          '%;background:' + color + '"></i></div>' +
+          '<div class="tiny subtle mt-1">已用 ' + Math.round(item.used_percent || 0) + '% · 重置 ' +
+          esc(item.reset_days == null ? "-" : item.reset_days + "天") + '</div></div>';
+      }).join("") + renderMihomoTraffic(instance.history || []));
+  }
+
+  function renderMihomoTraffic(points) {
+    if (points.length < 2) return '<div class="empty caption">速率曲线采样中，等待下一轮数据。</div>';
+    var max = Math.max.apply(null, points.map(function (point) { return Math.max(Number(point.up || 0), Number(point.down || 0)); }).concat([1]));
+    return '<div class="traffic-pair" aria-label="代理上下行速率趋势">' + points.slice(-36).map(function (point) {
+      var up = Math.max(2, Number(point.up || 0) / max * 30);
+      var down = Math.max(2, Number(point.down || 0) / max * 30);
+      return '<i class="down" style="height:' + down.toFixed(1) + 'px"></i>' +
+        '<i class="up" style="height:' + up.toFixed(1) + 'px"></i>';
+    }).join("") + '</div><div class="legend tiny subtle"><span>绿色 下行</span><span>橙色 上行</span></div>';
   }
 
   /* ── 共用：渠道余额 + WorkBuddy ── */
@@ -689,30 +983,34 @@
     if (cache.gwPipioDetail) out += renderPipioDetail(cache.gwPipioDetail);
     var wb = bal.workbuddy;
     if (wb) {
-      out += card('<div class="card-title">WorkBuddy 账号池</div>' +
+      var accountRows = (wb.accounts || []).map(function (a) {
+        var st = a.disabled ? ["off", "停用"] : a.cooling ? ["warn", "冷却"] : ["on", "正常"];
+        var cap = a.daily_cap;
+        var capText = cap == null ? "基线缺失" : cap === 0 ? "0（不计算百分比）" : n(cap, "--");
+        var pctText = (typeof a.credits === "number" && typeof cap === "number" && isFinite(cap) && cap > 0)
+          ? ' · 剩余 ' + Math.round(a.credits * 100 / cap) + '%'
+          : cap === 0 ? ' · 百分比不可用' : ' · 基线缺失';
+        return '<div class="list-row">' +
+          '<span class="grow"><span class="font-medium">' + esc(maskName(a.nickname)) + '</span>' +
+          '<div class="tiny subtle">额度 ' + n(a.credits, "--") + ' / ' + capText + pctText +
+          ' · 成功 ' + n(a.success_count, 0) + ' · 今日 ' + n(a.today_used, 0) + ' · 熔断 ' + n(a.breaker_fails, 0) + '</div></span>' +
+          '<span class="pill ' + st[0] + '">' + st[1] + '</span></div>';
+      }).join("");
+      out += card('<div class="row between"><span class="card-title">WorkBuddy 账号池</span>' +
+        '<span class="tiny subtle">共 ' + wb.total + ' 个</span></div>' +
         '<div class="row gap-2 mt-2 wrap-flex">' +
-        '<span class="pill neutral">共 ' + wb.total + '</span>' +
         '<span class="pill on">健康 ' + wb.healthy + '</span>' +
         (wb.cooling ? '<span class="pill warn">冷却 ' + wb.cooling + '</span>' : '') +
         (wb.disabled ? '<span class="pill off">停用 ' + wb.disabled + '</span>' : '') +
         '<span class="pill ' + ((wb.realm_servable || {}).global ? "on" : "warn") + '">global ' +
         ((wb.realm_servable || {}).global ? "可用" : "不可用") + '</span>' +
-        '<span class="tiny ml-auto font-semibold">余额汇总 ' +
+        '<span class="tiny subtle ml-auto font-semibold">余额汇总 ' +
         (wb.accounts || []).reduce(function (sum, a) { return sum + (typeof a.credits === 'number' ? a.credits : 0); }, 0).toLocaleString() +
-        '</span></div><div class="spacer-h"></div>' +
-        (wb.accounts || []).map(function (a) {
-          var st = a.disabled ? ["off", "停用"] : a.cooling ? ["warn", "冷却"] : ["on", "正常"];
-          var cap = a.daily_cap;
-          var capText = cap == null ? "基线缺失" : cap === 0 ? "0（不计算百分比）" : n(cap, "--");
-          var pctText = (typeof a.credits === "number" && typeof cap === "number" && isFinite(cap) && cap > 0)
-            ? ' · 剩余 ' + Math.round(a.credits * 100 / cap) + '%'
-            : cap === 0 ? ' · 百分比不可用' : ' · 基线缺失';
-          return '<div class="list-row">' +
-            '<span class="grow"><span class="font-medium">' + esc(maskName(a.nickname)) + '</span>' +
-            '<div class="tiny subtle">额度 ' + n(a.credits, "--") + ' / ' + capText + pctText +
-            ' · 成功 ' + n(a.success_count, 0) + ' · 今日 ' + n(a.today_used, 0) + ' · 熔断 ' + n(a.breaker_fails, 0) + '</div></span>' +
-            '<span class="pill ' + st[0] + '">' + st[1] + '</span></div>';
-        }).join(""));
+        '</span></div>' +
+        '<div class="row between mt-3"><span class="tiny subtle">账号明细</span>' +
+        '<button class="btn small" data-workbuddy-expand="' + (ui.workbuddyExpanded ? "0" : "1") + '">' +
+        (ui.workbuddyExpanded ? "收起" : "展开账号池") + '</button></div>' +
+        (ui.workbuddyExpanded ? accountRows : ''));
     }
     return out;
   }
@@ -763,11 +1061,11 @@
   }
 
   function renderTools(sub) {
+    if (sub === "downloader") return renderDownloaderStatus();
     var host = sub && HOST_LABEL[sub] ? sub : "nas";
-    var out = '<div class="tabs">' + Object.keys(HOST_LABEL).map(function (h) {
-      return '<button class="' + (h === host ? "active" : "") + '" data-tabhost="' + h + '">' + esc(HOST_LABEL[h]) + '</button>';
-    }).join("") + '</div>';
-    out += '<div class="grid grid-auto">' +
+    var out = '<div class="host-picker">' + Object.keys(HOST_LABEL).map(function (h) {
+      return '<button class="chip ' + (h === host ? "active" : "") + '" data-tabhost="' + h + '">' + esc(HOST_LABEL[h]) + '</button>';
+    }).join("") + '</div><div class="grid grid-auto">' +
       toolEntries(host).map(function (t) {
         return '<div class="card click tight mb-0" data-go="' + t.route + '">' +
           '<span class="accent-text">' + icon(t.icon, 18) + '</span>' +
@@ -781,6 +1079,19 @@
       '<div class="mt-3 font-semibold text-body">知识归档</div><div class="tiny muted">链接与文件收藏</div></div>' +
       '</div>';
     return out;
+  }
+
+  function renderDownloaderStatus() {
+    return card('<div class="row"><span class="icon-badge">' + icon("list", 19) + '</span>' +
+      '<div class="grow ml-2"><div class="card-title">下载器</div>' +
+      '<div class="caption muted">Transmission / qBittorrent 任务管理</div></div>' +
+      '<span class="pill warn">待接入</span></div>' +
+      '<div class="warnbox mt-3">当前后端没有下载器代理接口。Web 端已保留入口，但不会伪造列表、速度或任务操作。</div>' +
+      '<div class="kv mt-3">' +
+      '<div class="kv-item"><span>App 端能力</span><span>列表、任务、暂停继续、磁力添加</span></div>' +
+      '<div class="kv-item"><span>Web 端状态</span><span>等待后端接口</span></div>' +
+      '<div class="kv-item"><span>数据边界</span><span>未读取真实下载器数据</span></div>' +
+      '</div>');
   }
 
   /* ───────────── 页面：安全 ───────────── */
@@ -824,8 +1135,8 @@
 
   function renderSecurity(sub) {
     var host = sub && HOST_LABEL[sub] ? sub : "nas";
-    var out = '<div class="tabs">' + Object.keys(HOST_LABEL).map(function (h) {
-      return '<button class="' + (h === host ? "active" : "") + '" data-tabhost="' + h + '">' + esc(HOST_LABEL[h]) + '</button>';
+    var out = '<div class="host-picker">' + Object.keys(HOST_LABEL).map(function (h) {
+      return '<button class="chip ' + (h === host ? "active" : "") + '" data-tabhost="' + h + '">' + esc(HOST_LABEL[h]) + '</button>';
     }).join("") + '</div>';
 
     if (["nas", "aliyun", "tencent"].indexOf(host) < 0) return out + '<div class="warnbox">尚未接入独立安全采集器，Glances 系统监控可正常使用。</div>';
@@ -1208,7 +1519,7 @@
 
   function renderAsk() {
     return card('<div class="card-title">知识问答</div>' +
-      '<div class="caption muted mt-1">基于后端配置的 AnythingLLM 知识库回答，并列出引用来源</div>' +
+      '<div class="caption muted mt-1">基于 AnythingLLM 运维知识库（nas-docker）回答，并列出引用来源</div>' +
       '<div class="spacer-h"></div>' +
       '<label class="field"><span>问题</span><textarea id="askq" placeholder="例如：MoviePilot 的部署配置是什么？"></textarea></label>' +
       '<button class="btn primary" id="askbtn">提问</button>' +
@@ -1217,7 +1528,7 @@
 
   function renderArchive() {
     return card('<div class="card-title">知识归档</div>' +
-      '<div class="caption muted mt-1">把链接或文件归档到后端配置的 AnythingLLM 工作区</div>' +
+      '<div class="caption muted mt-1">把链接或文件交给 AnythingLLM 收藏归档（工作区 nas-docker）</div>' +
       '<div class="spacer-h"></div>' +
       '<label class="field"><span>页面链接</span><input type="text" id="arcurl" placeholder="粘贴 http(s) 链接"></label>' +
       '<button class="btn primary" id="archivebtn">归档链接</button>' +
@@ -1230,7 +1541,9 @@
 
   /* ───────────── 页面：设置 ───────────── */
 
-  function renderSettings() {
+  function renderSettings(sub) {
+    if (sub === "display") return renderDisplaySettings();
+    if (sub === "data") return renderDataSettings();
     return card('<div class="card-title">外观主题</div><div class="spacer-h"></div>' +
       '<div class="row gap-2 wrap-flex">' +
       [["light", "浅色"], ["dark", "深色"], ["purple", "紫夜"]].map(function (t) {
@@ -1242,12 +1555,59 @@
         return '<button class="chip ' + (active ? "active" : "") + '" data-accent="' + a[1] + '">' +
           '<span class="dot" style="background:' + a[1] + '"></span> ' + a[0] + '</button>';
       }).join("") + '</div>') +
-      card('<div class="card-title">自动刷新</div><div class="spacer-h"></div>' +
+      '<div class="footer-note">NAS Monitor Web · 数据源 nas-monitor-api</div>';
+  }
+
+  function renderDisplaySettings() {
+    return card('<div class="card-title">字体大小</div><div class="caption muted mt-1">与 App 的字号档位对齐，影响全站正文和界面标签。</div>' +
+      '<div class="row gap-2 wrap-flex mt-3">' +
+      [["standard", "标准"], ["large", "较大"], ["extra_large", "特大"]].map(function (option) {
+        return '<button class="chip ' + (displayFont() === option[0] ? "active" : "") +
+          '" data-display-font="' + option[0] + '">' + option[1] + '</button>';
+      }).join("") + '</div>') +
+      card('<div class="card-title">列表密度</div><div class="caption muted mt-1">视觉卡片保留指标；简洁列表减少卡片内留白和摘要高度。</div>' +
+        '<div class="row gap-2 wrap-flex mt-3">' +
+        [["visual", "视觉卡片"], ["compact", "简洁列表"]].map(function (option) {
+          return '<button class="chip ' + (displayDensity() === option[0] ? "active" : "") +
+            '" data-display-density="' + option[0] + '">' + option[1] + '</button>';
+        }).join("") + '</div>') +
+      card('<div class="card-title">卡片编号</div>' +
+        '<div class="row between mt-2"><span class="caption muted">服务器页显示 01–06 编号</span>' +
+        '<button class="switch ' + (cardNumbers() ? "on" : "") + '" role="switch" aria-checked="' +
+        (cardNumbers() ? "true" : "false") + '" data-card-numbers="' + (cardNumbers() ? "0" : "1") + '">' +
+        '<span></span></button></div>' +
+        '<div class="row gap-2 mt-3">' +
+        '<button class="btn small" data-display-move="up">选中卡片上移</button>' +
+        '<button class="btn small" data-display-move="down">下移</button>' +
+        '<button class="btn small" data-display-reset="1">恢复默认顺序</button>' +
+        '</div>' +
+        '<div class="tiny subtle mt-2">顺序同样适用于拖拽：可在服务器页直接拖动卡片。</div>') +
+      card('<div class="card-title">当前顺序</div><div class="order-list mt-2">' +
+      orderedOverviewIds().map(function (id, index) {
+        return '<button class="order-item" data-order-select="' + esc(id) + '">' +
+          '<span class="card-number">' + String(index + 1).padStart(2, "0") + '</span>' +
+          '<span class="grow">' + esc(overviewCardLabel(id)) + '</span>' +
+          '<span class="tiny subtle">选择</span></button>';
+      }).join("") + '</div>');
+  }
+
+  function overviewCardLabel(id) {
+    return id === "alerts" ? "告警摘要" : id === "router" ? "路由器" :
+      id === "airport" ? "机场看板" : HOST_LABEL[id] || id;
+  }
+
+  function renderDataSettings() {
+    return card('<div class="card-title">自动刷新</div><div class="spacer-h"></div>' +
         '<div class="row gap-2 wrap-flex">' +
         [[0, "关闭"], [5, "5 秒"], [10, "10 秒"], [30, "30 秒"], [60, "1 分钟"]].map(function (o) {
           return '<button class="chip ' + (refreshSec() === o[0] ? "active" : "") + '" data-refresh="' + o[0] + '">' + o[1] + '</button>';
         }).join("") + '</div>' +
         '<div class="tiny subtle mt-2">关闭后仍需手动刷新页面才会更新数据</div>') +
+      card('<div class="card-title">App 扫码导入</div>' +
+        '<div class="caption muted mt-1">用 NAS Monitor App 的「扫码导入」扫描下面的二维码，即可自动填入后端地址与访问口令。</div>' +
+        '<div class="spacer-h"></div>' +
+        '<div id="setup-qr" class="qr-box"><span class="spinner"></span></div>' +
+        '<div class="tiny subtle mt-2" id="setup-qr-note"></div>') +
       card('<div class="card-title">访问口令</div>' +
         '<div class="caption muted mt-1">口令仅保存在本浏览器的 localStorage，用于调用 /api/*</div>' +
         '<div class="spacer-h"></div>' +
@@ -1286,7 +1646,15 @@
   }
 
   /* 路由内部 UI 状态：重渲染时保留输入框/筛选/展开态（自动刷新每 10s 触发一次） */
-  var ui = { cFilter: "", ipShown: {}, svcOpen: {}, logName: null, logText: null, askQ: "", askOut: null, askPending: false, archiveUrl: "", archiveOut: null };
+  var ui = {
+    cFilter: "", ipShown: {}, svcOpen: {}, logName: null, logText: null,
+    askQ: "", askOut: null, askPending: false, archiveUrl: "", archiveOut: null,
+    sections: {}, proxyGroups: {}, mihomoInstance: "core", confirmAction: null,
+    displayFont: "standard", displayDensity: "visual", cardNumbers: true,
+    cardOrder: [], selectedCard: null, logsExpanded: false,
+    channelModels: {}, channelsExpanded: false, workbuddyExpanded: false,
+    modelsExpanded: false, proxyGroupsExpanded: false
+  };
 
   function render() {
     var route = currentRoute();
@@ -1296,16 +1664,17 @@
     }
     var main = route.split("/");
     var sub = main[1];
+    var root = primaryTabKey(route);
 
     var head = "";
     if (!isMainRoute(route)) {
-      head = '<div class="row mb-3">' +
+      head = '<div class="detail-page-head">' +
         '<button class="btn small" id="back">← 返回</button>' +
-        '<span class="grow"></span>' +
+        '<h1 class="page-title">' + esc(pageTitle(route)) + '</h1>' +
         '<button class="btn small" id="manual-refresh">' + icon("refresh", 13) + ' 刷新</button>' +
         '</div>';
     } else {
-      head = '<div class="row between"><h1 class="page-title">' + esc(pageTitle(route)) + '</h1>' +
+      head = '<div class="row between"><h1 class="page-title">' + esc(pageTitle(root)) + '</h1>' +
         '<div class="row gap-2">' +
         (route === "overview" ? '<button class="btn small" data-go="disks">' + icon("disk", 13) + ' 存储</button>' : '') +
         '<button class="btn small" id="manual-refresh">' + icon("refresh", 13) + '</button>' +
@@ -1318,7 +1687,7 @@
     else if (main[0] === "gateway") content = renderGateway();
     else if (main[0] === "tools") content = renderTools(sub);
     else if (main[0] === "security") content = renderSecurity(sub);
-    else if (main[0] === "settings") content = renderSettings();
+    else if (main[0] === "settings") content = renderSettings(sub);
     else if (main[0] === "router") content = renderRouter();
     else if (main[0] === "disks") content = renderDisks();
     else if (main[0] === "trends") content = renderTrends(sub || "nas");
@@ -1331,6 +1700,7 @@
     else content = '<div class="warnbox">未找到页面：' + esc(route) + '</div>';
 
     document.getElementById("pagehead").innerHTML = head;
+    renderSubtabs(route);
     document.getElementById("page").innerHTML = content;
     // extras（容器日志等次级卡片）只在对应路由下保留
     if (route.indexOf("containers") !== 0) {
@@ -1340,12 +1710,58 @@
       renderExtras();
     }
     renderNav();
+    applyOverviewPreferences(route);
     applyCardOrder(route);
+    renderDetailPanel(route);
     if (ui.lastRoute !== route) {
       ui.lastRoute = route;
       window.scrollTo(0, 0);
     }
     wire();
+  }
+
+  function applyOverviewPreferences() {
+    var page = document.getElementById("page");
+    var workbench = page && page.querySelector(".overview-workbench");
+    if (!workbench) return;
+    orderedOverviewIds().forEach(function (id) {
+      var node = workbench.querySelector('[data-overview-card="' + id + '"]');
+      if (node) workbench.appendChild(node);
+    });
+    Array.prototype.forEach.call(workbench.querySelectorAll("[data-overview-card]"), function (node, index) {
+      var label = String(index + 1).padStart(2, "0");
+      var number = node.querySelector(":scope > .card-number");
+      if (!number) {
+        number = document.createElement("span");
+        number.className = "card-number";
+        node.insertBefore(number, node.firstChild);
+      }
+      number.textContent = label;
+      if (window.matchMedia("(max-width: 560px)").matches) {
+        node.classList.add("mobile-summary-card");
+      } else {
+        node.classList.remove("mobile-summary-card");
+      }
+    });
+  }
+
+  function renderDetailPanel(route) {
+    var detail = document.getElementById("detail");
+    if (!detail) return;
+    var root = route.split("/")[0];
+    if (root === "overview" || HOST_LABEL[root]) {
+      detail.innerHTML = '<div class="detail-title">详情抽屉</div>' +
+        '<div class="detail-copy">主区与详情使用同一份快照，选择主机可继续查看资源、容器和服务。</div>' +
+        '<div class="detail-links"><a href="#/disks">存储空间</a><a href="#/alerts">告警列表</a><a href="#/settings/display">显示设置</a></div>';
+      return;
+    }
+    if (root === "gateway" || root === "tools") {
+      detail.innerHTML = '<div class="detail-title">快速入口</div>' +
+        '<div class="detail-copy">二级能力收在当前一级页内，六个主导航项始终一键可达。</div>' +
+        '<div class="detail-links"><a href="#/overview">服务器总览</a><a href="#/gateway/proxy">代理状态</a><a href="#/tools/downloader">下载器</a></div>';
+      return;
+    }
+    detail.innerHTML = "";
   }
 
   /* ── 卡片拖拽排序 ── */
@@ -1367,7 +1783,10 @@
   function wireCardDrag(route) {
     var page = document.getElementById("page");
     if (!page) return;
-    page.querySelectorAll(":scope > .card").forEach(function (card) {
+    var isOverview = !!page.querySelector(".overview-workbench");
+    var scope = isOverview ? page.querySelector(".overview-workbench") : page;
+    var selector = isOverview ? "[data-overview-card]" : ":scope > .card";
+    scope.querySelectorAll(selector).forEach(function (card) {
       if (!card.id) return;
       card.draggable = true;
       card.addEventListener("dragstart", function (e) {
@@ -1387,17 +1806,25 @@
         var srcId = e.dataTransfer.getData("text/plain");
         var src = document.getElementById(srcId);
         if (!src || src === card) return;
-        var cards = Array.prototype.slice.call(page.querySelectorAll(":scope > .card"));
+        var cards = Array.prototype.slice.call(scope.querySelectorAll(selector));
         var srcIdx = cards.indexOf(src);
         var dstIdx = cards.indexOf(card);
         if (srcIdx < dstIdx) {
-          page.insertBefore(src, card.nextSibling);
+          scope.insertBefore(src, card.nextSibling);
         } else {
-          page.insertBefore(src, card);
+          scope.insertBefore(src, card);
         }
         // 保存新顺序
-        var newOrder = Array.prototype.slice.call(page.querySelectorAll(":scope > .card")).map(function (c) { return c.id; });
+        var newOrder = Array.prototype.slice.call(scope.querySelectorAll(selector)).map(function (c) { return c.id; });
         localStorage.setItem(cardOrderKey(route), JSON.stringify(newOrder));
+        if (isOverview) {
+          var ids = Array.prototype.slice.call(scope.querySelectorAll("[data-overview-card]"))
+            .sort(function (a, b) {
+              return parseInt(a.getAttribute("data-card-index"), 10) - parseInt(b.getAttribute("data-card-index"), 10);
+            })
+            .map(function (node) { return node.getAttribute("data-overview-card"); });
+          localStorage.setItem(OVERVIEW_ORDER_KEY, JSON.stringify(ids));
+        }
         toast("卡片顺序已保存");
       });
     });
@@ -1441,12 +1868,18 @@
       put("airport", "/airport-traffic");
     } else if (m[0] === "gateway") {
       put("gwOverview", "/newapi/overview");
+      if (m[1] === "models") {
+        put("gwPerformance", "/newapi/performance");
+        put("gwModelsMeta", "/newapi/models");
+      }
       put("gwBalance", "/newapi/balance");
       put("gwProbe", "/newapi/probe");
       put("gwAffinity", "/newapi/affinity");
       put("gwPolicy", "/newapi/routing-policy");
       put("gwTokens", "/newapi/log-tokens");
       put("gwLogs", "/newapi/logs?p=0&page_size=30");
+      put("mihomoOverview", "/mihomo/overview");
+      put("mihomoAirports", "/mihomo/airports");
     } else if (m[0] === "security") {
       var h = m[1] && HOST_LABEL[m[1]] ? m[1] : "nas";
       if (["nas", "aliyun", "tencent"].indexOf(h) >= 0) put("sec_" + h, "/security/" + h);
@@ -1482,14 +1915,24 @@
   function refreshNow(background) {
     // 标签不可见或上一轮尚未结束时不抢占网络/主线程。
     if (background && document.hidden) return Promise.resolve(0);
-    if (refreshing) return Promise.resolve(0);
+    if (refreshing) {
+      if (!background) refreshQueued = true;
+      return Promise.resolve(0);
+    }
     refreshing = true;
     var route = currentRoute();
+    refreshRoute = route;
     return loadAll(route, !!background).then(function (count) {
       // 后台缓存未过期时不重建 DOM，避免输入、滚动和大表格产生卡顿。
-      if (!background || count > 0) render();
+      if (currentRoute() === refreshRoute && (!background || count > 0)) render();
       return count;
-    }).finally(function () { refreshing = false; });
+    }).finally(function () {
+      refreshing = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        refreshNow(false);
+      }
+    });
   }
 
   /* ───────────── 交互绑定 ───────────── */
@@ -1532,6 +1975,14 @@
   function wire() {
     var body = document.getElementById("page");
 
+    body.querySelectorAll("[data-ui-expand]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        var key = el.getAttribute("data-ui-expand");
+        ui.sections[key] = !ui.sections[key];
+        render();
+      });
+    });
+
     body.querySelectorAll("[data-cpage]").forEach(function (el) {
       el.addEventListener("click", function () {
         var host = (currentRoute().split("/")[1]) || "nas";
@@ -1542,9 +1993,93 @@
 
     body.querySelectorAll("[data-gwtab]").forEach(function (el) {
       el.addEventListener("click", function () {
-        localStorage.setItem("nas_gateway_tab", el.getAttribute("data-gwtab"));
+        var index = parseInt(el.getAttribute("data-gwtab"), 10);
+        var routes = ["gateway", "gateway/performance", "gateway/logs", "gateway/channels", "gateway/models", "gateway/proxy"];
+        localStorage.setItem(GATEWAY_TAB_KEY, String(index));
+        go(routes[index] || "gateway");
+      });
+    });
+
+    body.querySelectorAll("[data-logs-expand]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        ui.logsExpanded = el.getAttribute("data-logs-expand") === "1";
         render();
       });
+    });
+    body.querySelectorAll("[data-channel-models]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        var id = el.getAttribute("data-channel-models");
+        ui.channelModels[id] = !ui.channelModels[id];
+        render();
+      });
+    });
+    body.querySelectorAll("[data-channels-expand]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        ui.channelsExpanded = el.getAttribute("data-channels-expand") === "1";
+        render();
+      });
+    });
+    body.querySelectorAll("[data-workbuddy-expand]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        ui.workbuddyExpanded = el.getAttribute("data-workbuddy-expand") === "1";
+        render();
+      });
+    });
+    body.querySelectorAll("[data-models-expand]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        ui.modelsExpanded = el.getAttribute("data-models-expand") === "1";
+        render();
+      });
+    });
+    body.querySelectorAll("[data-proxy-expand]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        ui.proxyGroupsExpanded = el.getAttribute("data-proxy-expand") === "1";
+        render();
+      });
+    });
+
+    body.querySelectorAll("[data-mihomo-instance]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        ui.mihomoInstance = el.getAttribute("data-mihomo-instance");
+        render();
+      });
+    });
+    body.querySelectorAll("[data-mihomo-group]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        var key = ui.mihomoInstance + ":" + el.getAttribute("data-mihomo-group");
+        ui.proxyGroups[key] = !ui.proxyGroups[key];
+        render();
+      });
+    });
+    body.querySelectorAll("[data-mihomo-select]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        var group = el.getAttribute("data-mihomo-select");
+        var target = el.getAttribute("data-mihomo-target");
+        if (!group || !target || !window.confirm("将「" + group + "」切换到「" + target + "」？")) return;
+        el.disabled = true;
+        apiPost("/mihomo/instances/" + encodeURIComponent(ui.mihomoInstance) +
+          "/groups/" + encodeURIComponent(group) + "/select", { target: target })
+          .then(function (result) {
+            if (!result || result.applied !== true) throw new Error("切换未生效，当前为 " + ((result && result.now) || "未知"));
+            return api("/mihomo/overview").then(function (fresh) {
+              cache.mihomoOverview = fresh;
+              cacheAt.mihomoOverview = Date.now();
+              var selected = ((fresh.instances || []).find(function (item) { return item.id === ui.mihomoInstance; }) || {});
+              var currentGroup = (selected.groups || []).find(function (item) { return item.name === group; });
+              if (!currentGroup || currentGroup.now !== target) throw new Error("回读校验失败，节点未变更");
+              toast("已切换到 " + target);
+              render();
+            });
+          })
+          .catch(function (error) {
+            el.disabled = false;
+            toast("切换失败：" + error.message);
+          });
+      });
+    });
+    var panelButton = body.querySelector("[data-mihomo-panel]");
+    if (panelButton) panelButton.addEventListener("click", function () {
+      window.open("/panel/index.html?token=" + encodeURIComponent(token()), "_blank", "noopener");
     });
 
     body.querySelectorAll("[data-pipio]").forEach(function (el) {
@@ -1634,10 +2169,68 @@
         localStorage.setItem(REFRESH_KEY, b.getAttribute("data-refresh")); setupTimer(); render();
       });
     });
+    body.querySelectorAll("[data-display-font]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        localStorage.setItem(DISPLAY_FONT_KEY, b.getAttribute("data-display-font"));
+        applyTheme();
+        render();
+      });
+    });
+    body.querySelectorAll("[data-display-density]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        localStorage.setItem(DISPLAY_DENSITY_KEY, b.getAttribute("data-display-density"));
+        applyTheme();
+        render();
+      });
+    });
+    var numberToggle = body.querySelector("[data-card-numbers]");
+    if (numberToggle) numberToggle.addEventListener("click", function () {
+      localStorage.setItem(CARD_NUMBERS_KEY, numberToggle.getAttribute("data-card-numbers"));
+      applyTheme();
+      render();
+    });
+    body.querySelectorAll("[data-order-select]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        ui.selectedCard = b.getAttribute("data-order-select");
+        toast("已选择" + overviewCardLabel(ui.selectedCard));
+      });
+    });
+    body.querySelectorAll("[data-display-move]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        if (!ui.selectedCard) return toast("请先选择卡片");
+        var order = orderedOverviewIds();
+        var index = order.indexOf(ui.selectedCard);
+        var next = index + (b.getAttribute("data-display-move") === "up" ? -1 : 1);
+        if (index < 0 || next < 0 || next >= order.length) return toast("已经到边界");
+        order.splice(index, 1);
+        order.splice(next, 0, ui.selectedCard);
+        localStorage.setItem(OVERVIEW_ORDER_KEY, JSON.stringify(order));
+        render();
+      });
+    });
+    var orderReset = body.querySelector("[data-display-reset]");
+    if (orderReset) orderReset.addEventListener("click", function () {
+      localStorage.removeItem(OVERVIEW_ORDER_KEY);
+      ui.selectedCard = null;
+      render();
+      toast("已恢复默认顺序");
+    });
     var lg = document.getElementById("logout");
     if (lg) lg.addEventListener("click", function () {
       localStorage.removeItem(TOKEN_KEY); location.reload();
     });
+
+    // 设置：App 扫码导入二维码（令牌只存在于二维码图形内，不落到 DOM 文本）
+    var qrBox = document.getElementById("setup-qr");
+    if (qrBox) {
+      api("/app-setup-qr").then(function (d) {
+        qrBox.innerHTML = d.svg || "";
+        var note = document.getElementById("setup-qr-note");
+        if (note) note.textContent = "后端地址：" + (d.url || "--") + " · 生成于 " + (d.generated_at || "--");
+      }).catch(function (e) {
+        qrBox.innerHTML = '<div class="tiny subtle">二维码不可用：' + esc(e.message) + '</div>';
+      });
+    }
 
     // 网关：渠道开关
     body.querySelectorAll(".ch-toggle").forEach(function (b) {
@@ -1647,6 +2240,19 @@
         b.disabled = true;
         apiPost("/newapi/channels/" + id + "/status", { status: status })
           .then(function () { toast("渠道已" + (status === 1 ? "启用" : "停用")); return refreshNow(); })
+          .catch(function (e) { toast("失败：" + e.message); })
+          .finally(function () { b.disabled = false; });
+      });
+    });
+
+    // 网关：模型开关（常用模型）
+    body.querySelectorAll(".model-toggle").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var id = parseInt(b.getAttribute("data-id"), 10);
+        var status = parseInt(b.getAttribute("data-status"), 10);
+        b.disabled = true;
+        apiPost("/newapi/models/" + id + "/status", { status: status })
+          .then(function () { toast("模型已" + (status === 1 ? "启用" : "禁用")); return refreshNow(); })
           .catch(function (e) { toast("失败：" + e.message); })
           .finally(function () { b.disabled = false; });
       });
@@ -1829,6 +2435,7 @@
       afb.disabled = true;
       out.innerHTML = renderLoading("正在上传归档…");
       var fd = new FormData();
+      fd.append("addToWorkspaces", "nas-docker");
       fd.append("metadata", "{}");
       fd.append("file", f);
       fetch("/api/knowledge/archive/file", {
@@ -1861,7 +2468,7 @@
           clearInterval(t);
           if (timers.archive === t) timers.archive = null;
           out.innerHTML = d.status === "completed"
-            ? '<div class="okbox">归档完成（工作区 ' + esc(d.workspace || "后端配置") + '）</div>'
+            ? '<div class="okbox">归档完成（工作区 ' + esc(d.workspace || "nas-docker") + '）</div>'
             : '<div class="err">归档失败：' + esc(d.error || "未知错误") + '</div>';
         }
       }).catch(function () {});
@@ -1919,6 +2526,7 @@
       clearInterval(timers.archive);
       timers.archive = null;
     }
+    render();
     refreshNow(false);
   });
   document.addEventListener("visibilitychange", function () {

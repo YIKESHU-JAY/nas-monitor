@@ -53,7 +53,7 @@ fun AskScreen(nav: NavHostController) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
-                Text("基于后端配置的 AnythingLLM 知识库回答", color = Muted, fontSize = 13.sp)
+                Text("基于 AnythingLLM 运维知识库（nas-docker）回答", color = Muted, fontSize = 13.sp)
                 Text("问题会检索知识库并生成回答，同时列出引用来源", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
 

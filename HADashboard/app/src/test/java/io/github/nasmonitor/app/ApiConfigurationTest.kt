@@ -11,7 +11,7 @@ class ApiConfigurationTest {
     @Test
     fun normalizesSupportedServerOrigins() {
         assertEquals("https://example.com:23245", ApiClient.normalizeBaseUrl("  https://example.com:23245///  "))
-        assertEquals("http://192.168.1.2", ApiClient.normalizeBaseUrl("http://192.168.1.2/"))
+        assertEquals("http://192.0.2.12", ApiClient.normalizeBaseUrl("http://192.0.2.12/"))
     }
 
     @Test

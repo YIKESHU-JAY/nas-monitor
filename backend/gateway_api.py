@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 NEW_API_URL = os.environ.get("NEW_API_URL", os.environ.get("GATEWAY_NEW_API_URL", "")).rstrip("/")
 # 运行数据根目录：与 shadow_store 保持一致，便于自定义部署（默认 /app）。
@@ -121,22 +122,67 @@ def channel_view(channel):
     }
 
 
-def _performance_logs(max_pages=25):
-    """Read up to 24h of logs (New API ignores the type filter param), then keep
-    only consume(type=2) and error(type=5) records locally. Admin/login/topup
-    records are excluded from performance stats but still counted by _log_outcome
-    as 'admin' in the logs page."""
+def _log_total(cutoff, log_type):
+    """Lightweight 24h count: ask New API for one row and read its total.
+
+    The upstream supports server-side type filtering, so this avoids downloading
+    every log body just to count. Returns None when the response has no total.
+    """
+    data = request("GET", "/api/log/?p=0&page_size=1&start_timestamp=%d&type=%d" % (cutoff, log_type))
+    try:
+        return max(0, int(data.get("total")))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _requests_24h():
     cutoff = int(datetime.datetime.now().timestamp()) - 24 * 3600
-    out = []
-    for page in range(max_pages):
-        data = request("GET", "/api/log/?p=%d&page_size=100&start_timestamp=%d" % (page, cutoff))
-        batch = data.get("items", []) if isinstance(data, dict) else []
-        if not batch:
-            break
-        out.extend(batch)
-        oldest = min((int(x.get("created_at") or 0) for x in batch), default=0)
-        if oldest and oldest < cutoff:
-            break
+    consume = _log_total(cutoff, LOG_TYPE_CONSUME)
+    errors = _log_total(cutoff, LOG_TYPE_ERROR)
+    if consume is None and errors is None:
+        return None
+    return (consume or 0) + (errors or 0)
+
+
+def _fetch_log_page(cutoff, page):
+    data = request("GET", "/api/log/?p=%d&page_size=100&start_timestamp=%d" % (page, cutoff))
+    return data if isinstance(data, dict) else {}
+
+
+def _performance_logs(max_pages=120):
+    """Read up to 24h of logs for per-model performance only.
+
+    This is intentionally NOT used by overview(): overview uses the lightweight
+    _requests_24h() count. Model performance is loaded on demand by the 模型 tab.
+    Page count is derived from the upstream total instead of a fixed 25-page cap,
+    with a hard safety ceiling so a bad total cannot trigger unbounded reads.
+    New API ignores a combined type filter, so consume/error are filtered locally.
+    """
+    cutoff = int(datetime.datetime.now().timestamp()) - 24 * 3600
+    first = _fetch_log_page(cutoff, 0)
+    first_batch = first.get("items", []) if isinstance(first, dict) else []
+    try:
+        expected = max(0, int(first.get("total") or 0))
+    except (TypeError, ValueError):
+        expected = 0
+    if not first_batch:
+        return []
+    pages = min(max_pages, max(1, math.ceil(expected / 100.0))) if expected else max_pages
+    out = list(first_batch)
+    if pages > 1:
+        # Bounded parallelism: enough to cut latency, low enough not to hammer
+        # the New API admin endpoint.
+        workers = min(6, pages - 1)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_fetch_log_page, cutoff, p) for p in range(1, pages)]
+            for fut in as_completed(futures):
+                try:
+                    data = fut.result()
+                except Exception:
+                    continue
+                batch = data.get("items", []) if isinstance(data, dict) else []
+                if batch:
+                    out.extend(batch)
     kept = []
     for x in out:
         if int(x.get("created_at") or 0) < cutoff:
@@ -217,9 +263,27 @@ def overview():
     return _cached_read("overview", _build_overview)
 
 
-def _build_overview():
-    channel_data = request("GET", "/api/channel/?p=0&page_size=100")
-    channels = channel_data.get("items", []) if isinstance(channel_data, dict) else []
+def _gateway_rpm():
+    """Upstream rolling 1-minute request rate.
+
+    New API exposes it on /api/log/stat (admin scope). It is a live gauge, not a
+    window aggregate, so it is read through the same 60s read cache as overview
+    and degrades to None instead of failing the whole overview payload.
+    """
+    try:
+        data = _cached_read("log_stat", lambda: request("GET", "/api/log/stat"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        value = int(data.get("rpm"))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _build_performance():
     logs = _performance_logs()
     models = {}
     for log in logs:
@@ -253,10 +317,24 @@ def _build_overview():
             "avg_use_time": round(item["use_time_sum"] * 1000 / count, 0) if count else 0,
             "avg_frt": round(item["frt_sum"] / item["frt_count"], 0) if item["frt_count"] else None})
     performance.sort(key=lambda x: x["requests"], reverse=True)
-    return {"channels": [channel_view(c) for c in channels], "models": performance,
-            "recent_requests": len(logs), "window": "24h",
+    return performance
+
+
+def performance():
+    """Per-model 24h aggregation. Loaded only when the 模型 tab is opened."""
+    return _cached_read("performance", _build_performance)
+
+
+def _build_overview():
+    channel_data = request("GET", "/api/channel/?p=0&page_size=100")
+    channels = channel_data.get("items", []) if isinstance(channel_data, dict) else []
+    requests_24h = _requests_24h()
+    return {"channels": [channel_view(c) for c in channels], "models": [],
+            "requests_24h": requests_24h,
+            "recent_requests": requests_24h or 0, "window": "24h",
             "disabled_channels": sum(1 for c in channels if c.get("status") != 1),
             "auto_banned_channels": sum(1 for c in channels if c.get("auto_ban")),
+            "rpm": _gateway_rpm(),
             "generated_at": datetime.datetime.now().isoformat()}
 
 

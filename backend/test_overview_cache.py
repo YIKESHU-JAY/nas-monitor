@@ -128,5 +128,52 @@ class OverviewCacheTests(unittest.TestCase):
             build.assert_not_called()
 
 
+class AppSetupQrTests(unittest.TestCase):
+    """App 扫码导入：地址推断与 payload 组装（不依赖 qrcode 可选依赖）。"""
+
+    def setUp(self):
+        for item in (
+            patch.object(api_server, "PUBLIC_BASE_URL", ""),
+            patch.object(api_server, "APP_API_TOKEN", "app-token-for-qr"),
+        ):
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_public_base_url_wins_over_request_host(self):
+        with patch.object(api_server, "PUBLIC_BASE_URL", "https://monitor.example.com:23245"):
+            self.assertEqual("https://monitor.example.com:23245",
+                             api_server._setup_base_url("192.0.2.10:8765", "", False))
+
+    def test_request_host_falls_back_to_http(self):
+        self.assertEqual("http://192.0.2.10:8765",
+                         api_server._setup_base_url("192.0.2.10:8765", "", False))
+
+    def test_forwarded_proto_is_honoured(self):
+        self.assertEqual("https://nas.example.com",
+                         api_server._setup_base_url("nas.example.com", "https", False))
+
+    def test_tls_connection_defaults_to_https(self):
+        self.assertEqual("https://nas.example.com",
+                         api_server._setup_base_url("nas.example.com", "", True))
+
+    def test_invalid_host_is_rejected(self):
+        for host in ("", "   ", "has space", "evil/path", "host?x=1", "a\nb"):
+            with self.subTest(host=host):
+                self.assertEqual("", api_server._setup_base_url(host, "", False))
+
+    def test_payload_shape_and_escaping(self):
+        payload = api_server.app_setup_payload("https://monitor.example.com:23245")
+        self.assertTrue(payload.startswith("nasmonitor://setup?url="))
+        self.assertIn("url=https%3A%2F%2Fmonitor.example.com%3A23245", payload)
+        self.assertIn("token=app-token-for-qr", payload)
+
+    def test_payload_requires_base_url_and_token(self):
+        with self.assertRaises(RuntimeError):
+            api_server.app_setup_payload("")
+        with patch.object(api_server, "APP_API_TOKEN", ""):
+            with self.assertRaises(RuntimeError):
+                api_server.app_setup_payload("http://192.0.2.10:8765")
+
+
 if __name__ == "__main__":
     unittest.main()

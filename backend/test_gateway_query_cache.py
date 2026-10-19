@@ -12,7 +12,6 @@ import gateway_api
 class GatewayQueryTests(unittest.TestCase):
     def setUp(self):
         for replacement in (
-            patch.object(gateway_api, "NEW_API_URL", "http://upstream.example.invalid"),
             patch.object(gateway_api, "_read_cache", OrderedDict()),
             patch.object(gateway_api, "_retry_at", 0.0),
         ):
@@ -102,6 +101,51 @@ class GatewayQueryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 gateway_api.request("POST", "/api/channel/1/status", {"status": 2})
         self.assertFalse(gateway_api._read_cache)
+
+    def test_overview_exposes_upstream_rpm(self):
+        def fake_request(method, path, payload=None):
+            if path.startswith("/api/channel/"):
+                return {"items": []}
+            if path.startswith("/api/log/?"):
+                return {"items": []}
+            if path == "/api/log/stat":
+                return {"quota": 1, "rpm": 17, "tpm": 1986742}
+            raise AssertionError(path)
+
+        with patch.object(gateway_api, "request", side_effect=fake_request) as request:
+            result = gateway_api._build_overview()
+        self.assertEqual(17, result["rpm"])
+        self.assertEqual(1, sum(1 for call in request.call_args_list if call.args[1] == "/api/log/stat"))
+
+    def test_overview_rpm_degrades_to_none_when_stat_fails(self):
+        def fake_request(method, path, payload=None):
+            if path.startswith("/api/channel/"):
+                return {"items": []}
+            if path.startswith("/api/log/?"):
+                return {"items": []}
+            raise RuntimeError("log stat unavailable")
+
+        with patch.object(gateway_api, "request", side_effect=fake_request):
+            result = gateway_api._build_overview()
+        self.assertIsNone(result["rpm"])
+
+    def test_overview_rpm_accepts_numeric_string(self):
+        with patch.object(gateway_api, "_read_cache", OrderedDict()), \
+             patch.object(gateway_api, "request", return_value={"rpm": "17"}):
+            self.assertEqual(17, gateway_api._gateway_rpm())
+
+    def test_overview_rpm_rejects_unusable_values(self):
+        for payload in ({"rpm": None}, {}, {"rpm": -1}, {"rpm": "n/a"}, {"rpm": ""}, []):
+            with self.subTest(payload=payload), \
+                 patch.object(gateway_api, "_read_cache", OrderedDict()), \
+                 patch.object(gateway_api, "request", return_value=payload):
+                self.assertIsNone(gateway_api._gateway_rpm())
+
+    def test_overview_rpm_uses_shared_read_cache(self):
+        with patch.object(gateway_api, "request", return_value={"rpm": 9}) as request:
+            self.assertEqual(9, gateway_api._gateway_rpm())
+            self.assertEqual(9, gateway_api._gateway_rpm())
+        request.assert_called_once()
 
     def test_overview_retains_24_hour_statistics(self):
         with patch.object(gateway_api.time, "time", return_value=10000), \

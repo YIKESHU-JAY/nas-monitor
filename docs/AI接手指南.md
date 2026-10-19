@@ -1,6 +1,6 @@
 # 给接收方 AI：先勘察，再搭建
 
-本包为 NAS Monitor v214 源码快照，包含 Python 后端、同源静态 Web 和 Android App。阅读根 README.md、配置与凭据获取说明.md、需求规格.md、AGENTS.md 后按以下顺序执行。
+本包为 NAS Monitor v236 源码快照，包含 Python 后端、同源静态 Web 和 Android App。阅读根 README.md、配置与凭据获取说明.md、需求规格.md、AGENTS.md 后按以下顺序执行。
 
 ## 1. 核实当前环境
 

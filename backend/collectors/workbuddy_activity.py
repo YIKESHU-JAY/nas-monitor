@@ -6,7 +6,7 @@
 `/status` 里透出「请求 → 账号」的映射（`/status` 只有 in_flight 这类聚合计数）。
 唯一的信息源是上游的请求流水日志（`internal/server/logging.go` 的 `logChatRow`）：
 
-    | #1 | 12:00:00 | example-model | stream | 200 | account@example.invalid(00000000) | TTFB=100ms | tok=10 | 10.0tok/s | total=1.0s |
+    | #453 | 13:04:52 | global:deepseek-v4.1-flash | stream | 200 | user@example.com(deadbeef) | TTFB=3164ms | tok=208 | 47.0tok/s | total=4.9s |
 
 该行在请求**结束时**写出，所以这里给出的是「刚刚用过谁」，配合 `in_flight`
 （正在处理中）即可回答「现在在用哪个账号」。
@@ -28,6 +28,10 @@ SHANGHAI = timezone(timedelta(hours=8))
 # 上游实例：分组 id -> 容器名（可被环境变量覆盖，便于自定义部署）。
 DEFAULT_CONTAINER = os.environ.get("WORKBUDDY_CONTAINER", "workbuddy2api")
 WAN1_CONTAINER = os.environ.get("WORKBUDDY_WAN1_CONTAINER", "workbuddy2api-wan1")
+# wan3 的上游跑在 remote-nas 上，本机 docker 里没有它的容器，日志不可达。
+# 用空字符串显式表示「该分组不做最近使用采集」，避免退回默认出口容器而
+# 把默认池的请求误算到 wan3 头上。
+WAN3_CONTAINER = os.environ.get("WORKBUDDY_WAN3_CONTAINER", "")
 DOCKER_SOCK = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
 
 # 一次读取的日志行数。上游一行一个请求，500 行足以覆盖最近十几分钟的活动。
@@ -160,6 +164,15 @@ def _parse_line(line):
     }
 
 
+def _group_container(group_id):
+    """分组 -> 上游容器名；返回空字符串表示该分组不做日志采集。"""
+    if group_id == "wan1":
+        return WAN1_CONTAINER
+    if group_id == "wan3":
+        return WAN3_CONTAINER
+    return DEFAULT_CONTAINER
+
+
 def collect(minutes=15, group_id="default"):
     """返回最近 minutes 分钟的请求明细与按账号聚合。
 
@@ -171,8 +184,8 @@ def collect(minutes=15, group_id="default"):
     except (TypeError, ValueError):
         minutes = 15
 
-    container = WAN1_CONTAINER if group_id == "wan1" else DEFAULT_CONTAINER
-    lines = _docker_logs(container, _TAIL)
+    container = _group_container(group_id)
+    lines = _docker_logs(container, _TAIL) if container else []
     cutoff = int(time.time()) - minutes * 60
 
     requests = []

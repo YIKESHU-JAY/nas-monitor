@@ -1,14 +1,13 @@
 import json
-import os
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .shadow_store import atomic_write_json
 
-URL = os.environ.get("PIPIO_UPTIME_URL", "").strip()
-WATCH_PREFIX = os.environ.get("PIPIO_WATCH_PREFIX", "").strip()
-WATCH_MODELS = tuple(value.strip() for value in os.environ.get("PIPIO_WATCH_MODELS", "").split(",") if value.strip())
+URL = "https://pipio.io/api/uptime/status"
+WATCH_PREFIX = "gpt-5.6"
+WATCH_MODELS = ("gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-6-astra")
 
 
 def _uptime_ratio(raw) -> Optional[float]:
@@ -46,8 +45,6 @@ def _monitors(payload):
 
 
 def collect():
-    if not URL:
-        return {"status": "unconfigured", "items": []}
     request = urllib.request.Request(URL, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=45) as response:
         payload = json.load(response)
@@ -56,7 +53,7 @@ def collect():
     items = []
     for item in _monitors(payload):
         name = str(item.get("name") or "")
-        if (WATCH_PREFIX or WATCH_MODELS) and not ((WATCH_PREFIX and name.startswith(WATCH_PREFIX)) or name in WATCH_MODELS):
+        if not (name.startswith(WATCH_PREFIX) or name in WATCH_MODELS):
             continue
         ratio = _uptime_ratio(item.get("uptime"))
         status = _status(item)

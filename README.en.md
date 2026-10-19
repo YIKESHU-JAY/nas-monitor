@@ -1,4 +1,4 @@
-# NAS Monitor — Source Release (v214)
+# NAS Monitor — Source Release (v236)
 
 [中文说明](README.md) · English
 
@@ -29,7 +29,7 @@ GitHub workflows are **manual-trigger only**; pushing source will not build an A
 - `backend/api_server.py` — Python 3.11 backend entry point.
 - `backend/web/` — the actual single-page Web UI, served same-origin by the backend; no Node build step.
 - `backend/collectors/` — upstream adapters and optional collection jobs.
-- `HADashboard/` — Android v214/214.0, package `io.github.nasmonitor.app`, JDK 17 / SDK 34 / Gradle 8.7.
+- `HADashboard/` — Android v236/236.0, package `io.github.nasmonitor.app`, JDK 17 / SDK 34 / Gradle 8.7.
 - `docs/需求规格.md` and `docs/assets/` — functional spec and architecture diagrams. Pseudocode in the spec is not an entry point.
 - [Configuration & Credentials](docs/配置与凭据获取说明.md) — what each setting does, how to obtain it, and where it may be stored.
 - [Environment Survey Sheet](docs/环境勘察表.example.md) — a template for recording your own topology.

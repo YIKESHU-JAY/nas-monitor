@@ -1,6 +1,7 @@
 package io.github.nasmonitor.app.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.semantics.Role
@@ -68,6 +69,10 @@ private val gatewayNavItems = listOf(
 @Composable
 fun GatewayScreen(nav: NavHostController) {
     var overview by remember { mutableStateOf<NewApiGatewayOverview?>(null) }
+    var performance by remember { mutableStateOf<List<NewApiModelPerformance>?>(null) }
+    var performanceLoading by remember { mutableStateOf(false) }
+    var performanceError by remember { mutableStateOf<String?>(null) }
+    var lastPerformanceLoadAt by remember { mutableStateOf(0L) }
     var affinity by remember { mutableStateOf<NewApiAffinityState?>(null) }
     var routingPolicy by remember { mutableStateOf<NewApiRoutingPolicy?>(null) }
     var clearAffinityPending by remember { mutableStateOf(false) }
@@ -203,6 +208,26 @@ fun GatewayScreen(nav: NavHostController) {
             }
         }
     }
+    fun loadPerformance(silent: Boolean = false) = scope.launch {
+        if (performanceLoading) return@launch
+        retryMessage()?.let { performanceError = it; return@launch }
+        performanceLoading = true
+        if (!silent) loading = true
+        try {
+            performance = ApiClient.getNewApiPerformance().models
+            performanceError = null
+            lastPerformanceLoadAt = System.currentTimeMillis()
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            performanceError = "模型统计加载失败：${loadFailure(t)}"
+        } finally {
+            performanceLoading = false
+            if (!silent) {
+                loading = false
+                pullRefreshing = false
+            }
+        }
+    }
     fun loadModels() = scope.launch {
         if (modelsLoading) return@launch
         retryMessage()?.let { modelsError = it; pullRefreshing = false; return@launch }
@@ -319,6 +344,10 @@ fun GatewayScreen(nav: NavHostController) {
         if (page == 2 && (logs == null || logStale)) loadLogs(logPage)
         if (page == 2 && System.currentTimeMillis() - lastTokenLoadAt > 60_000) loadLogTokens()
         if (page == 4 && models == null) loadModels()
+        // 性能页（1）直接消费模型统计；概览（0）的成功率也依赖同一份数据，
+        // 因此首次进入这两个页面时按需加载，而不是只在“模型”页加载。
+        if (page in listOf(0, 1) && performance == null) loadPerformance(silent = page == 0)
+        if (page == 1 && performance != null && System.currentTimeMillis() - lastPerformanceLoadAt > 120_000) loadPerformance(silent = true)
         if (page != 2 && page != 4 && overview == null) loadOverview()
     }
     LaunchedEffect(pagerState.settledPage, lifecycleResumed) {
@@ -338,12 +367,9 @@ fun GatewayScreen(nav: NavHostController) {
     Scaffold(
         containerColor = PageBackground,
         topBar = {
-            Column {
-                AppPageHeader("网关")
-                GatewayTopTabs(selected = selectedTab) { target ->
-                    scope.launch {
-                        pagerState.animateScrollToPage(target)
-                    }
+            GatewayTopTabs(selected = selectedTab) { target ->
+                scope.launch {
+                    pagerState.animateScrollToPage(target)
                 }
             }
         }
@@ -355,7 +381,8 @@ fun GatewayScreen(nav: NavHostController) {
                     pullRefreshing = true
                     when (selectedTab) {
                         2 -> { loadLogs(logPage); loadLogTokens() }
-                        4 -> loadModels()
+                        1 -> loadPerformance()
+                        4 -> { loadModels(); loadPerformance() }
                         else -> loadOverview()
                     }
                 }
@@ -369,6 +396,7 @@ fun GatewayScreen(nav: NavHostController) {
                 when (page) {
                     0 -> GatewayOverviewPage(
                         data = overview,
+                        performance = performance,
                         affinity = affinity,
                         probe = probe,
                         balance = balance,
@@ -405,7 +433,7 @@ fun GatewayScreen(nav: NavHostController) {
                         },
                         onClearAffinity = { clearAffinityPending = true }
                     )
-                    1 -> GatewayPerformancePage(overview?.models ?: emptyList())
+                    1 -> GatewayPerformancePage(performance ?: emptyList(), performanceLoading, performanceError)
                     2 -> GatewayLogPage(
                         data = logs,
                         page = logPage,
@@ -449,7 +477,7 @@ fun GatewayScreen(nav: NavHostController) {
                             }
                         }
                     )
-                    else -> GatewayModelsPage(models, loading || opRunning != null, onToggle = { pendingModel = it })
+                    else -> GatewayModelsPage(models, performance, loading || opRunning != null, onToggle = { pendingModel = it })
                 }
             }
                 PullRefreshIndicator(
@@ -627,6 +655,7 @@ private fun GatewayTopTabs(selected: Int, onSelect: (Int) -> Unit) {
 @Composable
 private fun GatewayOverviewPage(
     data: NewApiGatewayOverview?,
+    performance: List<NewApiModelPerformance>?,
     affinity: NewApiAffinityState?,
     probe: NewApiProbeResponse?,
     balance: NewApiBalance?,
@@ -646,28 +675,32 @@ private fun GatewayOverviewPage(
     ) {
         if (data != null) {
             item {
-                val success = data.models.sumOf { it.success }
-                val failed = data.models.sumOf { it.failed }
+                val success = performance?.sumOf { it.success } ?: 0
+                val failed = performance?.sumOf { it.failed } ?: 0
                 val rate = if (success + failed > 0) success.toFloat() / (success + failed) else 0f
                 GatewayCard {
-                    // 三指标行
+                    // 四指标行：24h 请求 / 停用渠道 / 自动封禁 / RPM（New API 滚动 1 分钟请求数）
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        GatewayMetricCell("24h 请求", data.recentRequests.toString(), Blue, Modifier.weight(1f))
+                        GatewayMetricCell("24h 请求", (data.requests24h ?: data.recentRequests).toString(), Blue, Modifier.weight(1f))
                         Box(Modifier.width(1.dp).height(36.dp).background(Track))
                         GatewayMetricCell("停用渠道", data.disabledChannels.toString(), Amber, Modifier.weight(1f))
                         Box(Modifier.width(1.dp).height(36.dp).background(Track))
                         GatewayMetricCell("自动封禁", data.autoBannedChannels.toString(), Red, Modifier.weight(1f))
+                        Box(Modifier.width(1.dp).height(36.dp).background(Track))
+                        GatewayMetricCell("RPM", data.rpm?.toString() ?: "--", Green, Modifier.weight(1f))
                     }
-                    // 整体成功率：弱化展示，仅保留数值和进度条
-                    Spacer(Modifier.height(10.dp))
-                    Divider(color = Track, thickness = 0.8.dp)
-                    Spacer(Modifier.height(8.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("整体成功率", color = Muted, fontSize = 11.sp)
-                        Text("${(rate * 100).toInt()}%", color = successColor(rate), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    // 整体成功率：依赖按需加载的模型统计，未加载时不占位
+                    if (performance != null) {
+                        Spacer(Modifier.height(10.dp))
+                        Divider(color = Track, thickness = 0.8.dp)
+                        Spacer(Modifier.height(8.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("整体成功率", color = Muted, fontSize = 11.sp)
+                            Text("${(rate * 100).toInt()}%", color = successColor(rate), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(progress = rate, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(8.dp)), color = successColor(rate), trackColor = Track)
                     }
-                    Spacer(Modifier.height(4.dp))
-                    LinearProgressIndicator(progress = rate, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(8.dp)), color = successColor(rate), trackColor = Track)
                     val bal = balance
                     if (bal != null && bal.channels.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
@@ -994,6 +1027,15 @@ private fun WorkBuddyAccountCard(
         }
         Spacer(Modifier.height(8.dp))
 
+        // 全局判定：有在飞的分组都算正在使用；没有在飞时，只标最近一次请求落点，
+        // 避免多个分组各自带着 30 分钟内的历史 last_account 而同时显示「正在使用」。
+        val activeInFlightGroups = pool.groups.filter { g -> g.accounts.any { (it.inFlight ?: 0) > 0 } }.map { it.id }.toSet()
+        val latestUsedGroupId = if (activeInFlightGroups.isEmpty()) {
+            pool.groups
+                .mapNotNull { g -> g.lastAccount?.lastTs?.takeIf { it.isNotBlank() }?.let { g.id to it } }
+                .maxByOrNull { it.second }?.first
+        } else null
+
         pool.groups.forEach { group ->
             val expanded = group.id in expandedGroups
             Row(
@@ -1009,12 +1051,26 @@ private fun WorkBuddyAccountCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        if (expanded) "▾ ${group.name}" else "▸ ${group.name}",
-                        color = Ink,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    // 分组标题行直接标注「正在使用」，折叠时也能一眼看出当前走哪个出口。
+                    // 在飞 > 0 视为正在处理；否则看最近请求落点（与账号行同一判定口径）。
+                    val activeInFlight = group.accounts.sumOf { it.inFlight ?: 0 }
+                    val groupActive = group.id in activeInFlightGroups ||
+                        (activeInFlightGroups.isEmpty() && group.id == latestUsedGroupId)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (expanded) "▾ ${group.name}" else "▸ ${group.name}",
+                            color = if (groupActive) Blue else Ink,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (groupActive) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                if (activeInFlight > 0) "正在使用 · 在飞 $activeInFlight" else "正在使用",
+                                color = Blue, fontSize = 9.sp, fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
                     val groupSummary = buildString {
                         append("账号 ${group.total} 个")
                         append(" · 可用 ${group.healthy}")
@@ -1073,7 +1129,7 @@ private fun WorkBuddyAccountCard(
                                 Text("在飞 $inFlightNow", color = Green, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                             } else if (isLastUsed) {
                                 Spacer(Modifier.width(6.dp))
-                                Text("正在使用", color = Green, fontSize = 9.sp)
+                                Text("正在使用", color = Blue, fontSize = 9.sp)
                             }
                         }
                         if (credits != null && cap != null) {
@@ -1146,7 +1202,7 @@ private fun GatewayProbeCard(
     GatewayCard {
         if (probe == null) {
             Text("模型/模型池探针", color = Ink, fontWeight = FontWeight.SemiBold)
-            Text("等待 NAS Hermes 定时任务写入探针结果…", color = Muted, fontSize = 11.sp)
+            Text("等待探针结果…", color = Muted, fontSize = 11.sp)
             // 亲和性仍展示，避免 probe 为空时无法操作
             Spacer(Modifier.height(8.dp))
             Divider(color = Track, thickness = 0.8.dp)
@@ -1169,6 +1225,7 @@ private fun GatewayProbeCard(
             providerStatuses.any { it == "failed" } -> "failed"
             providerStatuses.any { it == "degraded" } -> "degraded"
             providerStatuses.any { it == "unknown" } || probe.isStale || probe.probeStatus == "stale" -> "unknown"
+            providerGroups.isEmpty() && (counts["unknown"] ?: 0) > 0 -> "unknown"
             else -> "healthy"
         }
         val statusColor = probeStatusColor(status)
@@ -1178,21 +1235,19 @@ private fun GatewayProbeCard(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("模型/模型池探针", color = Ink, fontWeight = FontWeight.SemiBold)
-                Text("NAS Hermes 定时任务 · ${probe.checkedAt?.replace("T", " ")?.take(16) ?: "暂无时间"}", color = Muted, fontSize = 11.sp)
+                Text(probe.checkedAt?.replace("T", " ")?.take(16) ?: "暂无时间", color = Muted, fontSize = 11.sp)
             }
             Surface(color = probeStatusSurface(status), shape = RoundedCornerShape(6.dp)) {
                 Text(probeStatusLabel(status), color = statusColor, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
             }
         }
         Spacer(Modifier.height(8.dp))
-        Text("模型/模型池：正常 ${counts["healthy"]} · 降级 ${counts["degraded"]} · 异常 ${counts["failed"]} · 未知 ${counts["unknown"]}", color = Muted, fontSize = 11.sp)
-
-        providerGroups.forEach { (provider, items) ->
+        val overallSummary = "正常 ${counts["healthy"]} · 降级 ${counts["degraded"]} · 异常 ${counts["failed"]} · 未知 ${counts["unknown"]}"
+        if (providerGroups.size == 1) {
+            val (provider, items) = providerGroups.entries.first()
             val groupStatus = providerStatus(items)
             val groupExpanded = provider in expandedProviders
-            val visible = if (groupExpanded) items else emptyList()
             val canExpand = items.isNotEmpty()
-            Spacer(Modifier.height(10.dp))
             Row(
                 Modifier.fillMaxWidth().clickable {
                     if (canExpand) expandedProviders = if (groupExpanded) expandedProviders - provider else expandedProviders + provider
@@ -1201,14 +1256,39 @@ private fun GatewayProbeCard(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(provider, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    Text("正常 ${items.count { it.status == "healthy" }} · 降级 ${items.count { it.status == "degraded" }} · 异常 ${items.count { it.status == "failed" }}", color = Muted, fontSize = 10.sp)
+                    Text(overallSummary, color = Muted, fontSize = 10.sp)
                 }
+                Spacer(Modifier.width(8.dp))
                 Surface(color = probeStatusSurface(groupStatus), shape = RoundedCornerShape(6.dp)) {
                     Text(probeStatusLabel(groupStatus), color = probeStatusColor(groupStatus), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
                 }
             }
-            if (groupExpanded) {
-                visible.forEach { ProbeItemRow(it) }
+            if (groupExpanded) items.forEach { ProbeItemRow(it) }
+        } else {
+            Text(overallSummary, color = Muted, fontSize = 11.sp)
+            providerGroups.forEach { (provider, items) ->
+                val groupStatus = providerStatus(items)
+                val groupExpanded = provider in expandedProviders
+                val visible = if (groupExpanded) items else emptyList()
+                val canExpand = items.isNotEmpty()
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier.fillMaxWidth().clickable {
+                        if (canExpand) expandedProviders = if (groupExpanded) expandedProviders - provider else expandedProviders + provider
+                    },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(provider, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text("正常 ${items.count { it.status == "healthy" }} · 降级 ${items.count { it.status == "degraded" }} · 异常 ${items.count { it.status == "failed" }}", color = Muted, fontSize = 10.sp)
+                    }
+                    Surface(color = probeStatusSurface(groupStatus), shape = RoundedCornerShape(6.dp)) {
+                        Text(probeStatusLabel(groupStatus), color = probeStatusColor(groupStatus), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
+                    }
+                }
+                if (groupExpanded) {
+                    visible.forEach { ProbeItemRow(it) }
+                }
             }
         }
 
@@ -1221,8 +1301,7 @@ private fun GatewayProbeCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text("NAS Hermes 监控任务", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    Text("任务状态独立统计，不混入模型健康汇总", color = Muted, fontSize = 10.sp)
+                    Text("监控任务", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
                 Text("正常 ${taskItems.count { it.status == "healthy" }} · 需关注 ${taskItems.count { it.status != "healthy" }}", color = Muted, fontSize = 10.sp)
             }
@@ -1275,19 +1354,19 @@ private fun AffinityRow(
 @Composable
 private fun GatewayMetricCell(label: String, value: String, accent: Color, modifier: Modifier) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(value, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = accent)
-        Text(label, fontSize = 10.sp, color = Muted)
+        Text(value, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = accent, maxLines = 1)
+        Text(label, fontSize = 10.sp, color = Muted, maxLines = 1)
     }
 }
 
 @Composable
-private fun GatewayPerformancePage(rows: List<NewApiModelPerformance>) {
+private fun GatewayPerformancePage(rows: List<NewApiModelPerformance>, loading: Boolean = false, error: String? = null) {
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 16.dp),
         contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp + LocalFloatingNavigationPadding.current),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (rows.isEmpty()) item { GatewayEmpty("暂无最近 24 小时模型请求") }
+        if (rows.isEmpty()) item { GatewayEmpty(if (loading) "正在加载模型统计…" else (error ?: "暂无最近 24 小时模型请求")) }
         item { Text("近 24 小时 · 按请求量排序", color = Muted, fontSize = 11.sp) }
         items(rows.sortedByDescending { it.requests }) { model ->
             val ratio = (model.successRate / 100).coerceIn(0.0, 1.0).toFloat()
@@ -1442,21 +1521,44 @@ private fun GatewayLogPage(
 }
 
 @Composable
-private fun GatewayModelsPage(rows: List<NewApiModelMeta>?, loading: Boolean, onToggle: (NewApiModelMeta) -> Unit) {
+private fun GatewayModelsPage(
+    rows: List<NewApiModelMeta>?,
+    performance: List<NewApiModelPerformance>?,
+    loading: Boolean,
+    onToggle: (NewApiModelMeta) -> Unit
+) {
+    // 常用模型 = 当前启用的模型；24h 有调用的排在前面并显示调用量。
+    // 已禁用且近期无调用的模型不展示，避免把“模型管理”变成全量清单。
+    val usage = performance.orEmpty().associateBy { it.model }
+    val visible = rows.orEmpty()
+        .filter { it.status == 1 || usage.containsKey(it.modelName) }
+        .sortedWith(compareByDescending<NewApiModelMeta> { usage[it.modelName]?.requests ?: 0 }
+            .thenByDescending { it.status == 1 })
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 16.dp),
         contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp + LocalFloatingNavigationPadding.current),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         if (rows == null) item { GatewayEmpty("正在读取模型状态…") }
-        if (rows?.isEmpty() == true) item { GatewayEmpty("暂无模型数据") }
-        items(rows ?: emptyList()) { model ->
+        if (rows != null && visible.isEmpty()) item { GatewayEmpty("暂无常用模型") }
+        if (visible.isNotEmpty()) {
+            item { Text("常用模型 · 近 24 小时", color = Muted, fontSize = 11.sp) }
+            item { Text("此开关只更新模型目录状态，不会从 /v1/models 隐藏，也不阻止实际调用。", color = Subtle, fontSize = 10.sp) }
+        }
+        items(visible, key = { it.id }) { model ->
             val enabled = model.status == 1
+            val used = usage[model.modelName]?.requests ?: 0
             CompactCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(model.modelName, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (enabled) "已启用" else "已禁用", color = if (enabled) Green else Muted, fontSize = 11.sp)
+                        Text(
+                            buildString {
+                                append(if (enabled) "已启用" else "已禁用")
+                                if (used > 0) append(" · 24h $used 次")
+                            },
+                            color = if (enabled) Green else Muted, fontSize = 11.sp
+                        )
                     }
                     CompactAction(if (enabled) "禁用" else "启用", if (enabled) Red else Blue, enabled = !loading) { onToggle(model) }
                 }
@@ -1491,26 +1593,28 @@ private fun GatewayChannelPage(
             CompactCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(channel.name, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Spacer(Modifier.height(4.dp))
-                        ResponseTimeChip(channel.responseTime)
+                        Text(channel.name, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 15.sp)
+                        Spacer(Modifier.height(3.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ResponseTimeChip(channel.responseTime)
+                            if (channel.autoBan != 0) {
+                                Spacer(Modifier.width(6.dp))
+                                Text("自动禁用生效中", color = Amber, fontSize = 10.sp, maxLines = 1)
+                            }
+                        }
                     }
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(6.dp))
                     CompactAction(if (enabled) "停用" else "启用", if (enabled) Red else Blue, enabled = !loading && policy != null && !policy.active) { onToggle(channel) }
                 }
-                if (channel.autoBan != 0) {
-                    Spacer(Modifier.height(4.dp))
-                    Text("自动禁用生效中", color = Amber, fontSize = 11.sp)
-                }
-                Spacer(Modifier.height(6.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Stepper("优先级", channel.priority, !loading && policy != null && !policy.active, { onPriority(channel, (channel.priority - 1).coerceAtLeast(0)) }, { onPriority(channel, (channel.priority + 1).coerceAtMost(100)) }, Modifier.weight(1f))
                     Stepper("权重", channel.weight, !loading && policy != null && !policy.active, { onWeight(channel, (channel.weight - 1).coerceAtLeast(0)) }, { onWeight(channel, channel.weight + 1) }, Modifier.weight(1f))
                 }
-                Spacer(Modifier.height(8.dp))
-                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    CompactAction("设为最优先", Blue, enabled = !loading && policy != null && !policy.active) { onPolicy(channel, "preferred") }
-                    CompactAction("仅使用此供应商", Red, enabled = !loading && policy != null && !policy.active) { onPolicy(channel, "exclusive") }
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    CompactAction("设为最优先", Blue, enabled = !loading && policy != null && !policy.active, modifier = Modifier.weight(1f)) { onPolicy(channel, "preferred") }
+                    CompactAction("仅使用此供应商", Red, enabled = !loading && policy != null && !policy.active, modifier = Modifier.weight(1f)) { onPolicy(channel, "exclusive") }
                 }
             }
         }
@@ -1552,10 +1656,10 @@ private fun RoutingPolicyCard(policy: NewApiRoutingPolicy?, loading: Boolean, on
 @Composable
 private fun Stepper(label: String, value: Int, enabled: Boolean, onMinus: () -> Unit, onPlus: () -> Unit, modifier: Modifier = Modifier) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, color = Muted, fontSize = 12.sp)
+        Text(label, color = Muted, fontSize = 11.sp)
         Row(verticalAlignment = Alignment.CenterVertically) {
             SmallIconButton(Icons.Default.Remove, "减少$label", enabled && value > 0, onMinus)
-            Text(value.toString(), color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            Text(value.toString(), color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.weight(1f))
             SmallIconButton(Icons.Default.Add, "增加$label", enabled, onPlus)
         }
@@ -1564,13 +1668,17 @@ private fun Stepper(label: String, value: Int, enabled: Boolean, onMinus: () -> 
 
 @Composable
 private fun SmallIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, desc: String, enabled: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)).background(if (enabled) BlueSoft else Track), contentAlignment = Alignment.Center) {
-            Icon(icon, desc, tint = if (enabled) Blue else Muted, modifier = Modifier.size(16.dp))
+    Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(Modifier.size(28.dp).clip(RoundedCornerShape(7.dp)).background(if (enabled) BlueSoft else Track), contentAlignment = Alignment.Center) {
+                Icon(icon, desc, tint = if (enabled) Blue else Muted, modifier = Modifier.size(15.dp))
+            }
         }
     }
 }
@@ -1588,19 +1696,22 @@ private fun ResponseTimeChip(timeMs: Long) {
 }
 
 @Composable
-private fun CompactAction(label: String, color: Color, enabled: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+private fun CompactAction(label: String, color: Color, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Text(
+        label,
+        color = if (enabled) color else Muted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+            .heightIn(min = 36.dp)
             .clip(RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(label, color = if (enabled) color else Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.clip(RoundedCornerShape(8.dp))
-                .background(if (enabled) color.copy(alpha = 0.12f) else Track)
-                .padding(horizontal = 10.dp, vertical = 7.dp))
-    }
+            .background(if (enabled) color.copy(alpha = 0.12f) else Track)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 9.dp, vertical = 9.dp)
+    )
 }
 
 @Composable
@@ -1685,5 +1796,74 @@ private fun GatewayEmpty(message: String) {
 private fun GatewayErrorBanner(message: String) {
     Surface(color = RedSoft, shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(16.dp).fillMaxWidth()) {
         Text(message, color = Red, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
+    }
+}
+
+@Composable
+internal fun AirportBoard(instance: MihomoAirportInstance, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        instance.items.forEachIndexed { index, item ->
+            val usedPercent = item.usedPercent.coerceAtLeast(0.0)
+            val remainingPercent = (100.0 - usedPercent).coerceIn(0.0, 100.0)
+            val color = when (item.level) { "critical" -> Red; "warning" -> Amber; else -> Green }
+            Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(item.name, color = Ink, fontWeight = FontWeight.Medium, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Text("${item.connections} 连接", color = Blue, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("剩余 ${"%.1f".format(item.remainingGb)} / ${"%.0f".format(item.totalGb)} GB",
+                    color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(5.dp))
+                LinearProgressIndicator(
+                    progress = (usedPercent / 100.0).toFloat().coerceIn(0f, 1f),
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(6.dp)),
+                    color = color, trackColor = Track
+                )
+                Spacer(Modifier.height(5.dp))
+                Text("已用 ${"%.0f".format(usedPercent)}% · 剩余 ${"%.0f".format(remainingPercent)}% · 重置 ${item.resetDays?.let { "${it}天" } ?: "-"}", color = Subtle, fontSize = 10.sp)
+            }
+            if (index != instance.items.lastIndex) {
+                Spacer(Modifier.height(8.dp))
+                Divider(color = Track, thickness = 0.7.dp)
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+        // 速率与曲线属于整个实例，只在末尾画一次，避免每个机场重复绘制同一份数据。
+        if (instance.items.isNotEmpty()) {
+            val latest = instance.history.lastOrNull()
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("↓ ${formatRateShort(latest?.down?.toDouble() ?: 0.0)}", color = Green, fontSize = 11.sp)
+                Text("↑ ${formatRateShort(latest?.up?.toDouble() ?: 0.0)}", color = Amber, fontSize = 11.sp)
+                Spacer(Modifier.weight(1f))
+                Text("实例合计", color = Subtle, fontSize = 10.sp)
+            }
+            Spacer(Modifier.height(5.dp))
+            MihomoTrafficChart(instance.history, Modifier.fillMaxWidth().height(34.dp))
+        }
+    }
+}
+
+@Composable
+internal fun MihomoTrafficChart(points: List<MihomoTrafficPoint>, modifier: Modifier = Modifier) {
+    val down = Green
+    val up = Amber
+    Canvas(modifier) {
+        if (points.size < 2) {
+            drawLine(Track, start = androidx.compose.ui.geometry.Offset(0f, size.height / 2),
+                end = androidx.compose.ui.geometry.Offset(size.width, size.height / 2), strokeWidth = 1.5f)
+            return@Canvas
+        }
+        val maxValue = points.maxOf { maxOf(it.up, it.down) }.coerceAtLeast(1L).toFloat()
+        fun pathFor(selector: (MihomoTrafficPoint) -> Long) = androidx.compose.ui.graphics.Path().also { path ->
+            points.forEachIndexed { index, point ->
+                val x = size.width * index / (points.size - 1).toFloat()
+                val y = size.height - (selector(point) / maxValue) * size.height
+                if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+        }
+        drawPath(pathFor { it.down }, down, style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
+        drawPath(pathFor { it.up }, up, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5f))
     }
 }

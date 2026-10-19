@@ -27,6 +27,22 @@ class UiAuditFixTest {
     }
 
     @Test
+    fun trendGapsMarkOnlyIntervalsLongerThanThreshold() {
+        val times = listOf(0.0, 10.0, 20.0, 100.0, 110.0)
+        val gaps = trendGaps(times, 25.0)
+        assertEquals(1, gaps.size)
+        assertEquals((20.0 / 110.0).toFloat(), gaps[0].startFraction, 0.0001f)
+        assertEquals((100.0 / 110.0).toFloat(), gaps[0].endFraction, 0.0001f)
+    }
+
+    @Test
+    fun trendGapsIgnoreUnorderedOrTooShortSeries() {
+        assertTrue(trendGaps(listOf(10.0), 25.0).isEmpty())
+        assertTrue(trendGaps(listOf(10.0, 10.0), 25.0).isEmpty())
+        assertTrue(trendGaps(listOf(0.0, 10.0, 20.0), 25.0).isEmpty())
+    }
+
+    @Test
     fun airportProgressUsesUsedPercentAndNeverLeavesIndicatorRange() {
         assertEquals(0f, airportUsedProgress(0.0), 0.0001f)
         assertEquals(0.5f, airportUsedProgress(50.0), 0.0001f)

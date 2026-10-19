@@ -4,10 +4,13 @@ NAS Monitor API - 聚合 NAS 和阿里云的监控数据
 跑在 NAS 上，供 App 调用
 """
 
+import io
 import json
 import os
 import re
 import hashlib
+import hmac
+import select
 import signal
 import http.client
 import socket
@@ -22,6 +25,7 @@ import mimetypes
 import uuid
 import fcntl
 import gateway_api
+import mihomo_api
 from airport_daily import SHANGHAI, update_usage as update_airport_daily_usage
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -245,7 +249,7 @@ def record_trend(host, cpu, memory, disk, rx_bps, tx_bps):
         if host != "nas" and host not in _load_server_registry():
             return
         _trends.setdefault(host, deque(maxlen=TREND_MAX)).append({
-            "t": datetime.now().isoformat(),
+            "t": datetime.now().astimezone().isoformat(),
             "cpu": round(cpu, 1),
             "mem": round(memory, 1),
             "disk": round(disk, 1),
@@ -534,10 +538,13 @@ ROUTER_BASE = os.environ.get("ROUTER_BASE", f"http://{ROUTER_HOST}" if ROUTER_HO
 # 局域网主网段前缀：同 MAC 多 IP 时优先保留该网段地址。
 LAN_PREFIX = os.environ.get("LAN_PREFIX", "192.168.").strip()
 
-HA_URL = os.environ.get("HA_URL", "")
+HA_URL = os.environ.get("HA_URL", f"http://{NAS_HOST}:8123/api/states")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 NEW_API_KEY = os.environ.get("NEW_API_KEY", "")
 APP_API_TOKEN = os.environ.get("APP_API_TOKEN", "")
+# App 扫码导入用的对外后端地址（含协议与端口）。留空则按请求 Host 推断，
+# 供纯内网访问时生成内网二维码；公网/反代场景建议显式配置。
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 # Web 端可使用独立令牌，避免忘记 Web 口令时影响已登录的 App。
 WEB_API_TOKEN = os.environ.get("WEB_API_TOKEN", "")
 # 一次性 Web 登录码：仅在 URL fragment 里传递，后端只接受一次 POST 兑换。
@@ -552,7 +559,7 @@ _WEB_BOOTSTRAP_LOCK = Lock()
 WEB_DIR = Path(__file__).resolve().parent / "web"
 ANYTHINGLLM_URL = os.environ.get("ANYTHINGLLM_URL", "").rstrip("/")
 ANYTHINGLLM_API_KEY = os.environ.get("ANYTHINGLLM_API_KEY", "")
-ANYTHINGLLM_WORKSPACE = os.environ.get("ANYTHINGLLM_WORKSPACE", "")
+ANYTHINGLLM_WORKSPACE = os.environ.get("ANYTHINGLLM_WORKSPACE", "nas-docker")
 # 归档 raw-text 时 AnythingLLM 会同步做分片+向量化，长文档可能耗时数分钟。
 ARCHIVE_EMBED_TIMEOUT = int(os.environ.get("ARCHIVE_EMBED_TIMEOUT", "600"))
 _ARCHIVE_TASKS = {}
@@ -561,7 +568,7 @@ _rate_lock = Lock()
 _rate_windows = {}
 _RATE_LIMIT = 120
 _RATE_WINDOW = 60.0
-NEW_API_URL = os.environ.get("NEW_API_URL", "").rstrip("/")
+NEW_API_URL = os.environ.get("NEW_API_URL", f"http://{NAS_HOST}:3002").rstrip("/")
 
 # 可选远程主机：留空则不在概览中显示（开源默认无远程主机）。
 ALIYUN_HOST = os.environ.get("ALIYUN_HOST", "").strip()
@@ -585,9 +592,9 @@ def _service_url(env_key, default=""):
 def _build_health_checks():
     nas = {}
     for name, env_key, default in (
-        ("new-api", "NAS_SERVICE_NEW_API", ""),
-        ("kuma", "NAS_SERVICE_KUMA", ""),
-        ("ha", "NAS_SERVICE_HA", ""),
+        ("new-api", "NAS_SERVICE_NEW_API", f"http://{NAS_HOST}:3002/v1/models"),
+        ("kuma", "NAS_SERVICE_KUMA", f"http://{NAS_HOST}:3004"),
+        ("ha", "NAS_SERVICE_HA", f"http://{NAS_HOST}:8123"),
         ("gitea", "NAS_SERVICE_GITEA", ""),
         ("mihomo-proxy", "NAS_SERVICE_MIHOMO", ""),
         ("safeline", "NAS_SERVICE_SAFELINE", ""),
@@ -606,7 +613,7 @@ def _build_health_checks():
     if ALIYUN_HOST:
         aliyun = {}
         for name, env_key, default in (
-            ("new-api", "ALIYUN_SERVICE_NEW_API", ""),
+            ("new-api", "ALIYUN_SERVICE_NEW_API", f"http://{ALIYUN_HOST}:3001/v1/models"),
             ("glances", "ALIYUN_SERVICE_GLANCES", ALIYUN_GLANCES),
             ("mihomo", "ALIYUN_SERVICE_MIHOMO", ""),
             ("coraza-waf", "ALIYUN_SERVICE_CORAZA", ""),
@@ -1159,7 +1166,7 @@ def get_glances(glances_url, timeout=5):
             })
         data["network"] = ifaces
         # 物理网卡优先，避免把 VPN/网桥/veth 等虚拟口当作 NAS 网速。
-        # 物理口名称可能变化，所以按命名规则匹配，
+        # 换主板后物理口会改名（enp1s0-ovs -> enp3s0-ovs），所以按命名规则匹配，
         # 不再写死单个网卡名；存在多个物理口时取流量最大的那个。
         def _is_virtual_nic(name):
             low = name.lower()
@@ -1229,6 +1236,36 @@ def docker_api_request(path, timeout=10):
     if status >= 400:
         raise RuntimeError(f"Docker API {status}: {payload.decode('utf-8', errors='replace')[:200]}")
     return json.loads(payload.decode() or "{}")
+
+
+_CONTAINER_ACTIONS = {"start": "start", "stop": "stop", "restart": "restart"}
+_CONTAINER_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+
+
+def docker_container_action(name, action, timeout=20):
+    """仅对 NAS 本机容器执行白名单动作，避免把 Docker API 全量暴露给 App。"""
+    if action not in _CONTAINER_ACTIONS:
+        raise ValueError("不支持的容器操作")
+    if not name or not _CONTAINER_NAME_PATTERN.fullmatch(name):
+        raise ValueError("容器名称格式无效")
+    import http.client
+    conn = http.client.HTTPConnection("localhost", timeout=timeout)
+    try:
+        conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.sock.settimeout(timeout)
+        conn.sock.connect("/var/run/docker.sock")
+        conn.request("POST", f"/containers/{urllib.parse.quote(name, safe='')}/{_CONTAINER_ACTIONS[action]}")
+        response = conn.getresponse()
+        payload = response.read()
+        status = response.status
+    finally:
+        conn.close()
+    if status == 404:
+        raise LookupError("容器不存在或已删除")
+    if status >= 400:
+        detail = payload.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(detail[:200] or f"Docker API {status}")
+    return {"ok": True, "host": "nas", "name": name, "action": action}
 
 
 def get_container_stats():
@@ -1423,9 +1460,9 @@ def get_ha_sensors():
     sensors["ups"] = {k:v for k,v in sensors["ups"].items() if v not in (None, "unknown", "unavailable")}
 
     sensors["cabinet"] = {
-        "temperature": _state(os.environ.get("HA_CABINET_TEMPERATURE_ENTITY", "")),
-        "humidity": _state(os.environ.get("HA_CABINET_HUMIDITY_ENTITY", "")),
-        "power": _state(os.environ.get("HA_CABINET_POWER_ENTITY", "")),
+        "temperature": _state("sensor.miaomiaoce_t2_45dd_temperature"),
+        "humidity": _state("sensor.miaomiaoce_t2_45dd_relative_humidity"),
+        "power": _state("sensor.yutai_fsov8w_e459_electric_power"),
         "energy_today": _state("sensor.cabinet_socket_energy_daily"),
         "energy_month": _state("sensor.cabinet_socket_energy_monthly"),
         "energy_total": _state("sensor.cabinet_socket_energy"),
@@ -1647,9 +1684,15 @@ def _airport_traffic_sampler():
     while not stop_event.is_set():
         try:
             get_airport_traffic()
+            for instance_key in mihomo_api.INSTANCES:
+                try:
+                    mihomo_api.sample_speeds(instance_key)
+                except mihomo_api.MihomoError:
+                    pass
         except Exception as exc:
             print(f"airport traffic sampling failed: {type(exc).__name__}")
-        stop_event.wait(_AIRPORT_TTL)
+        # 机场订阅自身仍按 _AIRPORT_TTL 缓存；这里 5 秒一轮只用于速率曲线采样。
+        stop_event.wait(mihomo_api.SAMPLE_SECONDS)
 
 
 def _get_airport_traffic_locked():
@@ -1662,6 +1705,11 @@ def _get_airport_traffic_locked():
     items = []
     secret = _mihomo_secret()
     gib = 1024 ** 3
+    # 连接归属复用 mihomo_api 的节点 -> provider 映射，避免两条链路口径不一致。
+    try:
+        attribution = mihomo_api.airport_connection_attribution("core")
+    except Exception:
+        attribution = {}
     for key, file_path in _AIRPORT_FILES.items():
         try:
             with open(file_path, encoding="utf-8", errors="ignore") as stream:
@@ -1695,8 +1743,10 @@ def _get_airport_traffic_locked():
                     daily = update_airport_daily_usage(key, upload_bytes + download_bytes, total_bytes)
                 except Exception as exc:
                     print(f"airport daily state unavailable ({key}): {type(exc).__name__}")
+            bucket = attribution.get(key, {"connections": 0})
             items.append({
-                "id": key, "name": _AIRPORT_NAMES[key], "remaining_gb": round(remaining, 2),
+                "id": key, "name": _AIRPORT_NAMES[key], "connections": int(bucket.get("connections") or 0),
+                "remaining_gb": round(remaining, 2),
                 "total_gb": round(total, 2), "used_gb": round(used, 2), "used_percent": used_percent,
                 "reset_days": int(reset_m.group(1)) if reset_m else None,
                 "expire": expire_m.group(1) if expire_m else None, "level": level, "data_source": data_source,
@@ -1893,6 +1943,61 @@ def _archive_worker(tid, link, metadata):
         with _ARCHIVE_LOCK:
             _ARCHIVE_TASKS[tid].update({"status": "failed", "error": str(e)[:500]})
 
+_SETUP_HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$")
+
+
+def _setup_base_url(host="", forwarded_proto="", is_tls=False):
+    """Resolve the backend address to embed in the App setup QR code.
+
+    PUBLIC_BASE_URL wins when configured (public/reverse-proxy deployments);
+    otherwise fall back to the request Host so a LAN-only deployment still
+    produces a scannable QR code.
+    """
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    host = (host or "").strip()
+    if not _SETUP_HOST_RE.match(host):
+        return ""
+    proto = (forwarded_proto or "").split(",")[0].strip().lower()
+    if proto not in ("http", "https"):
+        proto = "https" if is_tls else "http"
+    return proto + "://" + host
+
+
+def app_setup_payload(base_url):
+    """Build the `nasmonitor://setup` URI the App scans.
+
+    Kept separate from rendering so the payload can be asserted without the
+    optional qrcode dependency.
+    """
+    if not base_url:
+        raise RuntimeError("无法确定后端地址，请配置 PUBLIC_BASE_URL")
+    if not APP_API_TOKEN:
+        raise RuntimeError("APP_API_TOKEN 未配置，无法生成扫码配置")
+    return "nasmonitor://setup?url=%s&token=%s" % (
+        urllib.parse.quote(base_url, safe=""), urllib.parse.quote(APP_API_TOKEN, safe=""))
+
+
+def app_setup_qr(host="", forwarded_proto="", is_tls=False):
+    """Render the App setup QR code as inline SVG.
+
+    The token is only ever embedded inside the QR image; it is never returned
+    as plain text, so it does not land in the page DOM or browser devtools.
+    """
+    base_url = _setup_base_url(host, forwarded_proto, is_tls)
+    payload = app_setup_payload(base_url)
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except ImportError as exc:  # pragma: no cover - 依赖缺失时的明确降级
+        raise RuntimeError("缺少 qrcode 依赖，无法生成二维码") from exc
+    image = qrcode.make(payload, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=2)
+    buffer = io.BytesIO()
+    image.save(buffer)
+    return {"url": base_url, "svg": buffer.getvalue().decode("utf-8"),
+            "generated_at": datetime.now().isoformat()}
+
+
 def _consume_web_bootstrap_code(code):
     """Exchange a short-lived one-time code for the separate Web bearer token."""
     global _WEB_BOOTSTRAP_USED
@@ -2026,10 +2131,255 @@ class APIHandler(BaseHTTPRequestHandler):
                               {"Retry-After": str(error.retry_after)})
         return self._json({"error": str(error)}, 502)
 
+    def _panel_token_ok(self):
+        """MetaCubeXD assets are loaded by the WebView without our Bearer header.
+        Accept either a short-lived signed panel cookie or the token query parameter."""
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "nm_panel" and value:
+                if self._panel_cookie_valid(value):
+                    return True
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        supplied = (query.get("token") or [""])[0]
+        configured = (APP_API_TOKEN, WEB_API_TOKEN)
+        return any(value and secrets.compare_digest(supplied, value) for value in configured)
+
+    def _panel_cookie_valid(self, value):
+        parts = value.split(".")
+        if len(parts) != 4 or parts[0] != "v1":
+            return False
+        issued, instance, signature = parts[1], parts[2], parts[3]
+        try:
+            age = time.time() - float(issued)
+        except ValueError:
+            return False
+        if age < 0 or age >= 3600 or instance not in mihomo_api.INSTANCES:
+            return False
+        expected = hmac.new(APP_API_TOKEN.encode(), f"v1.{issued}.{instance}".encode(),
+                            hashlib.sha256).hexdigest()
+        return secrets.compare_digest(signature, expected)
+
+    def _panel_cookie_value(self, instance):
+        issued = f"{time.time():.0f}"
+        signature = hmac.new(APP_API_TOKEN.encode(), f"v1.{issued}.{instance}".encode(),
+                             hashlib.sha256).hexdigest()
+        return f"v1.{issued}.{instance}.{signature}"
+
+    def _panel_instance(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        requested = (query.get("instance") or [""])[0] or self.headers.get("X-Mihomo-Instance", "")
+        if requested in mihomo_api.INSTANCES:
+            return requested
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "nm_panel" and self._panel_cookie_valid(value):
+                instance = value.split(".")[2]
+                return mihomo_api.panel_instance(instance)
+        return "core"
+
+    def _panel_bootstrap(self):
+        """Serve the MetaCubeXD shell; auth then rides on an HttpOnly cookie."""
+        instance = self._panel_instance()
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        # 不能依赖 302 后 WebView 保留 Set-Cookie：旧 WebView 会丢掉重定向里的 cookie。
+        # 直接返回首屏，同时下发 cookie，并在页面内把 token 从地址栏抹掉。
+        has_token = bool((query.get("token") or [""])[0])
+        try:
+            status, headers, body = mihomo_api.panel_fetch("/index.html")
+        except mihomo_api.MihomoError as exc:
+            return self._json({"error": str(exc)}, 502)
+        if status != 200:
+            return self._json({"error": "管理面板暂时不可用"}, 502)
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
+        data = mihomo_api.panel_bootstrap_html(body.decode("utf-8", "replace"), host).encode()
+        if has_token:
+            clean = "/panel/index.html?instance=" + urllib.parse.quote(instance)
+            data = data.replace(b"</head>", (
+                "<script>try{history.replaceState(null,'','" + clean + "')}catch(e){}</script></head>"
+            ).encode(), 1)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        # Cookie 只在面板路径生效，避免把访问口令暴露在资源 URL 或日志里。
+        self.send_header("Set-Cookie",
+                         f"nm_panel={self._panel_cookie_value(instance)}; Path=/; HttpOnly; SameSite=Strict")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _panel_proxy(self, path, method):
+        """Transparently proxy MetaCubeXD static assets and API calls."""
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        if length > 65536:
+            return self._json({"error": "请求过大"}, 413)
+        body = self.rfile.read(length) if length else None
+        try:
+            status, headers, data = mihomo_api.panel_fetch(path, method, body)
+        except mihomo_api.MihomoError as exc:
+            return self._json({"error": str(exc)}, 502)
+        if path == "/config.js" and status == 200:
+            # 保留端口，否则面板探测会落到 80 端口。
+            host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
+            data = mihomo_api.panel_config_js(data.decode("utf-8", "replace"), host).encode()
+        self.send_response(status)
+        for name in ("Location", "ETag", "Last-Modified"):
+            value = headers.get(name)
+            if value:
+                self.send_header(name, value)
+        self.send_header("Content-Type", headers.get("Content-Type", "application/octet-stream"))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _panel_api(self, path, method):
+        """Same-origin control API for MetaCubeXD; the secret stays server-side."""
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        if length > 65536:
+            return self._json({"error": "请求过大"}, 413)
+        body = None
+        if length:
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            except ValueError:
+                return self._json({"error": "请求格式无效"}, 400)
+        instance = self.headers.get("X-Mihomo-Instance") or self._panel_instance()
+        if instance not in mihomo_api.INSTANCES:
+            return self._json({"error": "未知代理实例"}, 404)
+        try:
+            if path == "/traffic":
+                traffic = mihomo_api.traffic_sample(instance)
+                return self._json({
+                    "up": int(traffic.get("up") or 0),
+                    "down": int(traffic.get("down") or 0),
+                    "upTotal": int(traffic.get("upTotal") or 0),
+                    "downTotal": int(traffic.get("downTotal") or 0),
+                })
+            if path == "/connections":
+                return self._json(mihomo_api.panel_control(instance, "GET", "/connections"))
+            if path == "/memory":
+                return self._json({"inuse": 0, "oslimit": 0})
+            if path in ("/proxies", "/providers/proxies", "/configs", "/rules", "/version"):
+                return self._json(mihomo_api.panel_control(instance, "GET", path))
+            if method == "GET" and (path.startswith("/proxies/") or path.startswith("/providers/")):
+                return self._json(mihomo_api.panel_control(instance, "GET", path))
+            if method == "PUT" and re.fullmatch(r"/proxies/[^/]+", path):
+                return self._json(mihomo_api.panel_control(instance, "PUT", path, body or {}))
+            if method == "PUT" and re.fullmatch(r"/configs", path):
+                return self._json(mihomo_api.panel_control(instance, "PUT", path, body or {}))
+            if method == "DELETE" and re.fullmatch(r"/connections/[^/]+", path):
+                return self._json(mihomo_api.panel_control(instance, "DELETE", path))
+            if method == "DELETE" and path == "/connections":
+                return self._json(mihomo_api.panel_control(instance, "DELETE", path))
+            return self._json({"error": "面板接口不在允许范围"}, 404)
+        except mihomo_api.MihomoError as exc:
+            return self._json({"error": str(exc)}, 502)
+
+    def _panel_ws(self, path):
+        """Relay a WebSocket upgrade to Mihomo, injecting the server-side secret.
+
+        MetaCubeXD streams /traffic, /memory, /connections and /logs over WS.
+        Without this the panel renders but its live numbers never move.
+        """
+        instance = self._panel_instance()
+        if instance not in mihomo_api.INSTANCES:
+            return self._json({"error": "未知代理实例"}, 404)
+        upstream = urllib.parse.urlparse(mihomo_api.INSTANCES[instance]["api"])
+        host = upstream.hostname or ""
+        port = upstream.port or (443 if upstream.scheme == "https" else 80)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        forwarded = {k: v for k, v in query.items() if k not in ("token", "instance")}
+        # 上游鉴权用 Authorization 头，URL 里不再带 token，避免写进上游日志。
+        target = path + ("?" + urllib.parse.urlencode(forwarded, doseq=True) if forwarded else "")
+        secret = mihomo_api._secret(instance)
+        try:
+            sock = socket.create_connection((host, port), timeout=8)
+            sock.settimeout(None)
+            headers = [
+                f"GET {target} HTTP/1.1",
+                f"Host: {host}:{port}",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                f"Sec-WebSocket-Key: {self.headers.get('Sec-WebSocket-Key', '')}",
+                f"Sec-WebSocket-Version: {self.headers.get('Sec-WebSocket-Version', '13')}",
+            ]
+            if self.headers.get("Sec-WebSocket-Protocol"):
+                headers.append(f"Sec-WebSocket-Protocol: {self.headers['Sec-WebSocket-Protocol']}")
+            if secret:
+                headers.append(f"Authorization: Bearer {secret}")
+            sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode())
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            if b" 101 " not in response.split(b"\r\n", 1)[0]:
+                sock.close()
+                return self._json({"error": "实时通道不可用"}, 502)
+            # 仅本次升级使用 HTTP/1.1；其余响应仍是 1.0，避免 keep-alive 分帧问题。
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(101, "Switching Protocols")
+            for line in response.split(b"\r\n")[1:]:
+                if b":" in line:
+                    name, _, value = line.partition(b":")
+                    key = name.strip().lower()
+                    if key in (b"upgrade", b"connection", b"sec-websocket-accept", b"sec-websocket-protocol"):
+                        self.send_header(name.decode(), value.strip().decode())
+            self.end_headers()
+            self.wfile.flush()
+            client = self.connection
+            sockets = [client, sock]
+            while True:
+                readable, _, errored = select.select(sockets, [], sockets, 30)
+                if errored:
+                    break
+                if not readable:
+                    continue
+                for current in readable:
+                    data = current.recv(65536)
+                    if not data:
+                        return
+                    (sock if current is client else client).sendall(data)
+        except Exception:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     def do_GET(self):
         path = self.path.split('?')[0].rstrip('/')
         if path == '/health' or path == '/api/health':
             return self._json({"ok": True, "service": "nas-monitor-api", "time": datetime.now().isoformat()})
+        if path.startswith(('/proxies', '/traffic', '/connections', '/memory', '/configs',
+                            '/rules', '/version')):
+            if not self._panel_token_ok() and not self._authorized():
+                return self._json({"error": "unauthorized"}, 401)
+            if self.headers.get("Upgrade", "").lower() == "websocket":
+                return self._panel_ws(path)
+            return self._panel_api(path, "GET")
+        # MetaCubeXD shell: same-origin, token passed as a query parameter and
+        # stripped from the URL by a small bootstrap page before the SPA loads.
+        if path in ('/panel', '/panel/index.html', '/panel.html'):
+            if not self._authorized() and not self._panel_token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._panel_bootstrap()
+        # MetaCubeXD 使用绝对 /_nuxt/ 资源路径，必须原样反代，不能挂子路径。
+        if path.startswith('/_nuxt/') or path.startswith('/_fonts/') or path in ('/config.js', '/polyfill.js',
+                                                  '/favicon.svg',
+                                                  '/manifest.webmanifest',
+                                                  '/apple-touch-icon-180x180.png'):
+            if not self._authorized() and not self._panel_token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._panel_proxy(path, "GET")
+        if path.startswith('/panel/') or path.startswith('/api/mihomo/panel/'):
+            if not self._authorized() and not self._panel_token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            upstream = path[len('/api/mihomo'):] if path.startswith('/api/mihomo/panel/') else path
+            # /panel/config.js 在上游是根路径 /config.js；其余 /panel/* 保持原样。
+            if upstream == '/panel/config.js':
+                upstream = '/config.js'
+            return self._panel_proxy(upstream, "GET")
         # 内网 Web 端：先给静态壳，页面自己再拿口令调 /api/*
         if not path.startswith('/api'):
             if self._static(path):
@@ -2067,6 +2417,14 @@ class APIHandler(BaseHTTPRequestHandler):
             with _ARCHIVE_LOCK:
                 task = dict(_ARCHIVE_TASKS.get(task_id) or {})
             return self._json(task if task else {"error": "task not found"}, 200 if task else 404)
+        if path == '/api/app-setup-qr':
+            try:
+                return self._json(app_setup_qr(
+                    self.headers.get('Host', ''),
+                    self.headers.get('X-Forwarded-Proto', ''),
+                    isinstance(self.connection, ssl.SSLSocket)))
+            except Exception as e:
+                return self._json({"error": str(e)}, 503)
         if path == '/api/ping':
             return self._json({"ok": True, "time": datetime.now().isoformat()})
 
@@ -2092,6 +2450,13 @@ class APIHandler(BaseHTTPRequestHandler):
         elif path == '/api/newapi/overview':
             try:
                 return self._json(gateway_api.overview())
+            except Exception as e:
+                return self._gateway_error(e)
+
+        elif path == '/api/newapi/performance':
+            try:
+                return self._json({"models": gateway_api.performance(), "window": "24h",
+                                   "generated_at": datetime.now().isoformat()})
             except Exception as e:
                 return self._gateway_error(e)
 
@@ -2134,6 +2499,73 @@ class APIHandler(BaseHTTPRequestHandler):
 
         elif path == '/api/airport-traffic':
             return self._json(get_airport_traffic())
+
+        elif path == '/api/mihomo/overview':
+            try:
+                return self._json({"instances": mihomo_api.all_instances()})
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 502)
+
+        elif path == '/api/mihomo/airports':
+            try:
+                return self._json({"instances": mihomo_api.airports()})
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 502)
+
+        elif path == '/api/mihomo/panel-url':
+            token = self.headers.get("X-API-Token") or ""
+            if not token:
+                auth = self.headers.get("Authorization", "")
+                token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            instance = (query.get("instance") or ["core"])[0]
+            if instance not in mihomo_api.INSTANCES:
+                return self._json({"error": "未知代理实例"}, 404)
+            # v2 没有独立面板，复用 core 面板但把控制 API 指向 v2 实例。
+            return self._json({"url": "/panel/index.html?token=" + urllib.parse.quote(token)
+                                     + "&instance=" + urllib.parse.quote(instance)})
+
+        elif path == '/api/mihomo/instances/connections':
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            instance = (query.get("instance") or ["core"])[0]
+            try:
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError:
+                limit = 100
+            try:
+                return self._json(mihomo_api.connections(instance, limit))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+
+        elif path == '/api/mihomo/instances/rules':
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            instance = (query.get("instance") or ["core"])[0]
+            try:
+                return self._json(mihomo_api.rules(instance))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+
+        elif path == '/api/mihomo/instances/configs':
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            instance = (query.get("instance") or ["core"])[0]
+            try:
+                return self._json(mihomo_api.configs(instance))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+
+        elif path == '/api/mihomo/instances/providers':
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            instance = (query.get("instance") or ["core"])[0]
+            try:
+                return self._json(mihomo_api.providers(instance))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+
+        elif (match := re.fullmatch(r"/api/mihomo/instances/([^/]+)/proxies/([^/]+)/delay", path)):
+            try:
+                return self._json(mihomo_api.test_node(match.group(1), match.group(2)))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
 
         elif path == '/api/overview':
             now_mono = time.monotonic()
@@ -2285,6 +2717,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     minutes = int(parts[4])
                 except ValueError:
                     pass
+            minutes = max(1, min(minutes, 1440))
             return self._json({"host": host, "minutes": minutes, "points": get_trends(host, minutes)})
 
         elif path == '/api/router':
@@ -2486,6 +2919,11 @@ class APIHandler(BaseHTTPRequestHandler):
         return self._json({"error": "not found"}, 404)
 
     def do_DELETE(self):
+        panel_path = self.path.split("?", 1)[0].rstrip("/")
+        if panel_path.startswith(("/connections", "/proxies", "/configs", "/rules")):
+            if not self._panel_token_ok() and not self._authorized():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._panel_api(panel_path, "DELETE")
         if not self._authorized():
             return self._json({"error": "unauthorized"}, 401)
         path = self.path.split("?", 1)[0].rstrip("/")
@@ -2502,6 +2940,12 @@ class APIHandler(BaseHTTPRequestHandler):
         except OSError:
             return self._json({"error": "删除未保存，请重试"}, 500)
 
+    def do_PUT(self):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if not self._panel_token_ok() and not self._authorized():
+            return self._json({"error": "unauthorized"}, 401)
+        return self._panel_api(path, "PUT")
+
     def do_POST(self):
         path = self.path.split('?')[0].rstrip('/')
         # 此端点不接受既有 bearer；仅限短时、一次性登录码兑换 Web 令牌。
@@ -2517,8 +2961,82 @@ class APIHandler(BaseHTTPRequestHandler):
                 return self._json({"token": WEB_API_TOKEN})
             except Exception:
                 return self._json({"error": "not found"}, 404)
+        if path.startswith(('/proxies', '/traffic', '/connections', '/configs', '/rules')):
+            if not self._panel_token_ok() and not self._authorized():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._panel_api(path, "POST")
         if not self._authorized():
             return self._json({"error": "unauthorized"}, 401)
+        match = re.fullmatch(r"/api/mihomo/instances/([^/]+)/groups/([^/]+)/select", path)
+        if match:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                body = json.loads(self.rfile.read(length).decode("utf-8") or "{}") if length else {}
+                return self._json(mihomo_api.select_group(match.group(1), match.group(2), body.get("target")))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+        match = re.fullmatch(r"/api/mihomo/instances/([^/]+)/connections/close-all", path)
+        if match:
+            try:
+                return self._json(mihomo_api.close_all_connections(match.group(1)))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+        match = re.fullmatch(r"/api/mihomo/instances/([^/]+)/connections/([^/]+)/close", path)
+        if match:
+            try:
+                return self._json(mihomo_api.close_connection(match.group(1), match.group(2)))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+        match = re.fullmatch(r"/api/mihomo/instances/([^/]+)/rules/disable", path)
+        if match:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                body = json.loads(self.rfile.read(length).decode("utf-8") or "{}") if length else {}
+                return self._json(mihomo_api.set_rule_disabled(
+                    match.group(1), body.get("index"), body.get("disabled")))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+        match = re.fullmatch(r"/api/mihomo/instances/([^/]+)/config", path)
+        if match:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                body = json.loads(self.rfile.read(length).decode("utf-8") or "{}") if length else {}
+                return self._json(mihomo_api.set_config(match.group(1), body.get("key"), body.get("value")))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+        match = re.fullmatch(r"/api/mihomo/instances/([^/]+)/providers/([^/]+)/(update|healthcheck)", path)
+        if match:
+            try:
+                name = urllib.parse.unquote(match.group(2))
+                return self._json(mihomo_api.provider_action(match.group(1), name, match.group(3)))
+            except mihomo_api.MihomoError as exc:
+                return self._json({"error": str(exc)}, 502)
+        container_action = re.fullmatch(r"/api/containers/([^/]+)/([^/]+)/(start|stop|restart)", path)
+        if container_action:
+            host, raw_name, action = container_action.groups()
+            host = urllib.parse.unquote(host)
+            name = urllib.parse.unquote(raw_name)
+            if host != "nas":
+                return self._json({"error": "仅支持管理 NAS 本机容器"}, 400)
+            try:
+                result = docker_container_action(name, action)
+                return self._json({**result, "containers": get_docker_stats()})
+            except ValueError as error:
+                return self._json({"error": str(error)}, 400)
+            except LookupError as error:
+                return self._json({"error": str(error)}, 404)
+            except Exception as error:
+                return self._json({"error": f"容器操作失败：{str(error)[:300]}"}, 500)
+        if path.startswith('/api/mihomo/panel/'):
+            if not self._authorized() and not self._panel_token_ok():
+                return self._json({"error": "unauthorized"}, 401)
+            return self._panel_proxy(path[len('/api/mihomo'):], "POST")
         if path in ("/api/servers", "/api/servers/check"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -2779,13 +3297,11 @@ def trend_sampler():
 
 
 if __name__ == "__main__":
-    if not any(value and len(value) >= 24 and not value.startswith("CHANGE_ME") for value in (APP_API_TOKEN, WEB_API_TOKEN)):
-        raise SystemExit("请配置至少 24 位的 APP_API_TOKEN 或 WEB_API_TOKEN")
     port = int(os.environ.get("API_PORT", 8765))
     health_port = int(os.environ.get("HEALTH_PORT", 8766))
     scheduler_lock = None
     scheduler_thread = None
-    if os.environ.get("NAS_MONITOR_SCHEDULER", "0") != "0":
+    if os.environ.get("NAS_MONITOR_SCHEDULER", "1") != "0":
         lock_path = Path(os.environ.get("BACKEND_ROOT", "/app")) / ".nas-monitor-scheduler.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         scheduler_lock = open(lock_path, "a+", encoding="utf-8")
@@ -2801,6 +3317,16 @@ if __name__ == "__main__":
     # 概览预热与 log-tokens 周期刷新
     Thread(target=_overview_warmer, daemon=True).start()
     Thread(target=_airport_traffic_sampler, daemon=True).start()
+    # WorkBuddy 账号监听：人工加/删账号后秒级重采，不必等 600s 周期。
+    # 本地出口看 auths 目录指纹；wan3 的目录不在本机（不再挂 NFS），
+    # 改用 remote-nas 面板的账号清单参与指纹。只读，不依赖面板回调，
+    # 因此不受第三方 workbuddy-manager 更新影响。
+    if os.environ.get("WORKBUDDY_WATCH_ENABLED", "1") != "0":
+        try:
+            workbuddy_collector.start_account_watch(stop_event)
+            print("  workbuddy account watch: on (auths 目录/面板账号变化即重采)")
+        except Exception as exc:
+            print(f"  workbuddy account watch: off ({exc})")
     server = MonitorHTTPServer(("0.0.0.0", port), APIHandler)
     health_server = ThreadingHTTPServer(("127.0.0.1", health_port), HealthHandler)
     Thread(target=health_server.serve_forever, daemon=True).start()

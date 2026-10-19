@@ -7,12 +7,13 @@ from typing import Any, Optional
 from .shadow_store import atomic_write_json, shadow_path
 
 RATE = 500000  # 50 万额度 ≈ $1
-BASE_URL = os.environ.get("PIPIO_BASE_URL", "").rstrip("/")
-API = BASE_URL + "/api/user/self" if BASE_URL else ""
-SECRET_DIR = os.environ.get("PIPIO_SECRET_DIR", "/run/secrets")
+API = "https://pipio.io/api/user/self"
+# 每个账号一个目录（compose 挂目录而非单文件，外部 token 丢失也不会阻塞容器启动）。
+SECRET_DIR = os.environ.get("PIPIO_SECRET_DIR", "/run/secrets/pipio")
+SECRET_DIR2 = os.environ.get("PIPIO2_SECRET_DIR", "/run/secrets/pipio2")
 ACCOUNTS = (
-    {"name": "pipio", "uid": os.environ.get("PIPIO_USER_ID", ""), "token_file": "pipio-admin-token.txt"},
-    {"name": "pipio2", "uid": os.environ.get("PIPIO2_USER_ID", ""), "token_file": "pipio2-admin-token.txt"},
+    {"name": "pipio", "uid": "123", "token_file": "pipio-admin-token.txt", "secret_dir": SECRET_DIR},
+    {"name": "pipio2", "uid": "1455", "token_file": "pipio2-admin-token.txt", "secret_dir": SECRET_DIR2},
 )
 
 
@@ -20,8 +21,8 @@ def _now() -> str:
     return datetime.now(timezone(timedelta(hours=8))).isoformat()
 
 
-def _read_token(token_file: str) -> str:
-    path = os.path.join(SECRET_DIR, token_file)
+def _read_token(token_file: str, secret_dir: str = SECRET_DIR) -> str:
+    path = os.path.join(secret_dir, token_file)
     try:
         with open(path, encoding="utf-8") as stream:
             return stream.read().strip()
@@ -30,8 +31,6 @@ def _read_token(token_file: str) -> str:
 
 
 def _fetch_balance(name: str, uid: str, token: str) -> dict:
-    if not API or not uid:
-        return {"name": name, "usd": None, "quota": None, "error": "未配置上游地址或用户 ID"}
     if not token:
         return {"name": name, "usd": None, "quota": None, "error": "无管理令牌文件"}
     request = urllib.request.Request(API)
@@ -108,14 +107,12 @@ def _month_start_quota(quota_now: Optional[float], channel_name: str) -> Optiona
 
 
 def collect() -> dict:
-    if not API:
-        return {"status": "unconfigured", "channels": []}
     now_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S+08:00")
     channels = []
     total = 0.0
     for account in ACCOUNTS:
         name = account["name"]
-        token = _read_token(account["token_file"])
+        token = _read_token(account["token_file"], account["secret_dir"])
         info = _fetch_balance(name, account["uid"], token)
         if info.get("error") or info.get("quota") is None:
             channels.append({

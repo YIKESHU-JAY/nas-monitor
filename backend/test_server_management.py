@@ -16,10 +16,6 @@ class ServerManagementTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.registry = Path(temporary.name) / "servers.json"
         for mocked in (
-            patch.object(api, "ALIYUN_HOST", "remote-one.example.invalid"),
-            patch.object(api, "TENCENT_HOST", "remote-two.example.invalid"),
-            patch.object(api, "ALIYUN_GLANCES", "http://remote-one.example.invalid:61208"),
-            patch.object(api, "TENCENT_GLANCES", "http://remote-two.example.invalid:61208"),
             patch.object(api, "SERVER_REGISTRY_FILE", self.registry),
             patch.object(api, "APP_API_TOKEN", "test-token"),
             patch.object(api, "WEB_API_TOKEN", ""),

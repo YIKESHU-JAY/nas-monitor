@@ -31,6 +31,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -125,6 +127,9 @@ private fun MonitorAuthGate(expired: Boolean, onCancel: (() -> Unit)? = null, on
         }
     }
 
+    val baseDensity = LocalDensity.current
+    val fontScale = DisplayPreferences.fontScaleOption.scale
+    CompositionLocalProvider(LocalDensity provides Density(baseDensity.density, baseDensity.fontScale * fontScale)) {
     MaterialTheme {
         Surface(color = AppBg, modifier = Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(28.dp), contentAlignment = androidx.compose.ui.Alignment.Center) {
@@ -195,6 +200,7 @@ private fun MonitorAuthGate(expired: Boolean, onCancel: (() -> Unit)? = null, on
             }
         }
     }
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -205,6 +211,9 @@ class MainActivity : ComponentActivity() {
         CrashReporter.install(applicationContext)
         ApiClient.init(this)
         ServerRegistry.init(this)
+        DownloaderStore.init(this)
+        CardOrderStore.init(this)
+        DisplayPreferences.init(this)
         DataCache.init(this)
         setContent {
             val context = LocalContext.current
@@ -241,10 +250,15 @@ class MainActivity : ComponentActivity() {
             }
             val systemUi = rememberSystemUiController()
             SideEffect { systemUi.setSystemBarsColor(Color.Transparent, darkIcons = !useDark) }
+            val baseDensity = LocalDensity.current
+            val fontScale = DisplayPreferences.fontScaleOption.scale
             MaterialTheme(
                 colorScheme = if (useDark) darkColorScheme(primary = Blue, secondary = Purple, tertiary = Green, background = AppBg, surface = OverlaySurface, surfaceVariant = OverlayVariant, onBackground = Ink, onSurface = Ink, onSurfaceVariant = Muted, outline = Track)
                 else lightColorScheme(primary = Blue, secondary = Purple, tertiary = Green, background = AppBg, surface = OverlaySurface, surfaceVariant = OverlayVariant, onBackground = Ink, onSurface = Ink, onSurfaceVariant = Muted, outline = Track)
             ) {
+                CompositionLocalProvider(
+                    LocalDensity provides Density(baseDensity.density, baseDensity.fontScale * fontScale)
+                ) {
                 val nav = rememberNavController()
                 val entry by nav.currentBackStackEntryAsState()
                 val route = entry?.destination?.route ?: "overview"
@@ -258,8 +272,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 LaunchedEffect(entry, managedServers) {
-                    val target = entry?.arguments?.getString("serverId") ?: entry?.arguments?.getString("host")
-                        ?: route.takeIf { it in listOf("nas", "aliyun", "tencent") }
+                    val routeNow = entry?.destination?.route
+                    val target = when (routeNow) {
+                        "server/{serverId}", "ssh/{serverId}", "server-edit/{serverId}" ->
+                            entry?.arguments?.getString("serverId")
+                        "trends/{host}", "temperature/{host}", "containers/{host}", "services/{host}" ->
+                            entry?.arguments?.getString("host")
+                        "nas", "aliyun", "tencent" -> routeNow
+                        else -> null
+                    }
                     if (target != null && managedServers.none { it.id == target }) {
                         nav.navigate("overview") { popUpTo("overview") { inclusive = true }; launchSingleTop = true }
                     }
@@ -333,6 +354,11 @@ class MainActivity : ComponentActivity() {
                             composable("overview") { OverviewScreen(nav) }
                             composable("tools") { ToolsScreen(nav) }
                             composable("gateway") { GatewayScreen(nav) }
+                            composable("proxy") { ProxyScreen(nav = nav, onBack = { nav.popBackStack() }) }
+                            composable("proxy_panel?url={url}") { entry ->
+                                val url = entry.arguments?.getString("url") ?: ""
+                                ProxyPanelScreen(url = url, onBack = { nav.popBackStack() })
+                            }
                             composable("knowledge-archive") { KnowledgeArchiveScreen(nav) }
                             composable("ask") { AskScreen(nav) }
                             composable("alerts") { AlertsScreen(nav) }
@@ -356,9 +382,39 @@ class MainActivity : ComponentActivity() {
                             }
                             composable("tencent") { TencentScreen(onBack = { nav.popBackStack() }, onSsh = { nav.navigate("ssh/tencent") }, onEdit = { nav.navigate("server-edit/tencent") }) }
                             composable("security") { SecurityScreen() }
+                            composable("downloaders") {
+                                DownloadersScreen(
+                                    onBack = { nav.popBackStack() },
+                                    onOpen = { nav.navigate("downloader/$it") },
+                                    onAdd = { nav.navigate("downloader-edit/new") }
+                                )
+                            }
+                            composable("downloader/{serverId}") { e ->
+                                val serverId = e.arguments?.getString("serverId") ?: return@composable
+                                DownloaderTasksScreen(
+                                    serverId = serverId,
+                                    onBack = { nav.popBackStack() },
+                                    onOpenTorrent = { nav.navigate("torrent/$serverId/$it") },
+                                    onEditServer = { nav.navigate("downloader-edit/$serverId") }
+                                )
+                            }
+                            composable("torrent/{serverId}/{torrentId}") { e ->
+                                val serverId = e.arguments?.getString("serverId") ?: return@composable
+                                val torrentId = e.arguments?.getString("torrentId") ?: return@composable
+                                TorrentDetailScreen(serverId, torrentId, onBack = { nav.popBackStack() })
+                            }
+                            composable("downloader-edit/{serverId}") { e ->
+                                val serverId = e.arguments?.getString("serverId")?.takeIf { it != "new" }
+                                DownloaderServerEditScreen(
+                                    serverId,
+                                    onBack = { nav.popBackStack() },
+                                    onSaved = { nav.popBackStack() },
+                                    onDeleted = { nav.popBackStack() }
+                                )
+                            }
                             composable("settings") { SettingsScreen(onChangeToken = {
                                 changingToken = true
-                            }) }
+                            }, onManageServers = { nav.navigate("servers") }) }
                             composable("server-edit/{serverId}") { e ->
                                 val serverId = e.arguments?.getString("serverId") ?: "nas"
                                 ServerConnectionEditScreen(serverId, onBack = { nav.popBackStack() }, onSaved = { nav.popBackStack() })
@@ -385,6 +441,7 @@ class MainActivity : ComponentActivity() {
                             }
                         })
                     }
+                }
                 }
             }
         }

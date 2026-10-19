@@ -9,6 +9,7 @@
 <style>.hidden { display: none !important; }</style>
 </head>
 <body>
+<a class="skip-link" href="#main">跳到主要内容</a>
 
 <!-- 访问口令门（与 App 首启门一致：口令只留本地） -->
 <div id="auth" class="auth-shell hidden">
@@ -27,13 +28,15 @@
 
 <!-- 主应用 -->
 <div id="app" class="hidden">
-  <div class="wrap">
+  <nav id="nav" class="nav" aria-label="主导航"></nav>
+  <main id="main" class="wrap" tabindex="-1">
     <div id="globalerr"></div>
     <div id="pagehead"></div>
+    <div id="subtabs"></div>
     <div id="page"></div>
     <div id="extras"></div>
-  </div>
-  <nav id="nav" class="nav"></nav>
+  </main>
+  <aside id="detail" class="detail" aria-label="页面详情"></aside>
 </div>
 
 <div id="toast" class="toast"></div>

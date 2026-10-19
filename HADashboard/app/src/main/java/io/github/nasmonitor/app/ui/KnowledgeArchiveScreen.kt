@@ -151,7 +151,7 @@ fun KnowledgeArchiveScreen(nav: NavHostController) {
         ) {
             item {
                 Text("把链接或文件交给 AnythingLLM 收藏归档", color = Muted, fontSize = 13.sp)
-                Text("归档到后端配置的知识库工作区", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text("归档到工作区：nas-docker", color = Blue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
 
             // 链接归档卡片

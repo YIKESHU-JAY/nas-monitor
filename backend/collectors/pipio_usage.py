@@ -8,11 +8,13 @@ from typing import Optional
 
 from .shadow_store import atomic_write_snapshot
 
-API = os.environ.get("PIPIO_BASE_URL", "").rstrip("/")
-SECRET_DIR = os.environ.get("PIPIO_SECRET_DIR", "/run/secrets")
+API = "https://pipio.io"
+# 每个账号一个目录（compose 挂目录而非单文件，外部 token 丢失也不会阻塞容器启动）。
+SECRET_DIR = os.environ.get("PIPIO_SECRET_DIR", "/run/secrets/pipio")
+SECRET_DIR2 = os.environ.get("PIPIO2_SECRET_DIR", "/run/secrets/pipio2")
 ACCOUNTS = (
-    {"name": "pipio", "uid": os.environ.get("PIPIO_USER_ID", ""), "display": os.environ.get("PIPIO_ACCOUNT_NAME", "Account 1"), "token_file": "pipio-admin-token.txt"},
-    {"name": "pipio2", "uid": os.environ.get("PIPIO2_USER_ID", ""), "display": os.environ.get("PIPIO2_ACCOUNT_NAME", "Account 2"), "token_file": "pipio2-admin-token.txt"},
+    {"name": "pipio", "uid": "123", "display": "一棵树爱吃草", "token_file": "pipio-admin-token.txt", "secret_dir": SECRET_DIR},
+    {"name": "pipio2", "uid": "1455", "display": "星群矩阵", "token_file": "pipio2-admin-token.txt", "secret_dir": SECRET_DIR2},
 )
 Q = 500000  # quota / 500000 = USD
 SHANGHAI = timezone(timedelta(hours=8))
@@ -27,8 +29,8 @@ def _display_when() -> str:
     return now.strftime("%Y-%m-%d %H:%M")
 
 
-def _read_token(token_file: str) -> str:
-    path = os.path.join(SECRET_DIR, token_file)
+def _read_token(token_file: str, secret_dir: str = SECRET_DIR) -> str:
+    path = os.path.join(secret_dir, token_file)
     try:
         with open(path, encoding="utf-8") as stream:
             return stream.read().strip()
@@ -37,8 +39,6 @@ def _read_token(token_file: str) -> str:
 
 
 def _fetch(path: str, token: str, uid: str) -> dict:
-    if not API or not uid:
-        raise RuntimeError("未配置上游地址或用户 ID")
     req = urllib.request.Request(API + path)
     req.add_header("Authorization", "Bearer " + token)
     req.add_header("Pipio-User", str(uid))
@@ -162,13 +162,11 @@ def _usd(q) -> float:
 
 
 def collect() -> dict:
-    if not API:
-        return {"status": "unconfigured", "accounts": []}
     items = []
     any_ok = False
     for account in ACCOUNTS:
         name = account["name"]
-        token = _read_token(account["token_file"])
+        token = _read_token(account["token_file"], account["secret_dir"])
         if not token:
             data = {"name": name, "display": account["display"], "ok": False,
                     "err": "无令牌文件", "tok": [], "mod": [], "daily": [0] * 7}
