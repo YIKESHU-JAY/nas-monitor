@@ -46,8 +46,8 @@
   },
   {
     "path": "CHANGELOG.md",
-    "size": 5983,
-    "sha256": "cf612855137df1530bd345b3efd5c7891cd01df181b7b89459d126b5d1b76425"
+    "size": 6787,
+    "sha256": "afd863ee671c74282e4638de1d557d7bde9d8e019fa2da60a287e5c2c61294f6"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -506,13 +506,13 @@
   },
   {
     "path": "README.en.md",
-    "size": 9471,
-    "sha256": "17434183a55edd6ff77ef852982ef3aae7caa0abd2fa181841a3b98b254a3a30"
+    "size": 7195,
+    "sha256": "fa040c3edb9b5165a561e772e3dadb91dcea3d2f7eda9346c0c955eb4b48232d"
   },
   {
     "path": "README.md",
-    "size": 8226,
-    "sha256": "bcb138447bdb88353451accec22ea15a41e0bb4826f3e0a390d84dc2bc77d2be"
+    "size": 6487,
+    "sha256": "138cefc28098ddb2571468012188acca0212bb51ab67b66aa8382580a659a1ef"
   },
   {
     "path": "backend/.dockerignore",
