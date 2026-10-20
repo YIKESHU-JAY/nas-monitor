@@ -6,7 +6,7 @@ A self-hosted dashboard for NAS and AI gateway monitoring, with an Android app a
 
 ## Current Version
 
-This documentation release is **v238.1**. The Android app remains at **238 / 238.0**; this patch only reorganizes the README and screenshot layout. It does not change business source, the APK, or screenshot assets.
+This documentation release is **v238.2**. The Android app remains at **238 / 238.0**; this patch restores the author's personal-use note in the README. It does not change business source, the APK, or screenshot assets.
 
 Main capabilities:
 
@@ -17,6 +17,8 @@ Main capabilities:
 - WorkBuddy multi-egress accounts, dynamic remote servers, and optional tools.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history (written in Chinese).
+
+> **A quick note**: this started as a small tool the author built for personal use. Both the code and the deployment were done entirely with AI, and every design decision targets the author's own NAS setup rather than general-purpose use. It is not meant to be a universal product, so it may not fit every scenario. If you happen to have a similar need, feel free to reference it and adapt it as you like; if your setup differs, that is completely understandable — hopefully it is still of some help. 🙂
 
 ## Usage Page
 
