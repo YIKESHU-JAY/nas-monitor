@@ -1,4 +1,4 @@
-# NAS Monitor — Source Release (v236)
+# NAS Monitor — Source Release (v238)
 
 [中文说明](README.md) · English
 
@@ -40,12 +40,27 @@ GitHub workflows are **manual-trigger only**; pushing source will not build an A
 - **Airport dashboard**: compare primary and standby proxy instances, connection counts, subscription balances, usage ratios, and live traffic trends.
 - **Mihomo proxy**: view instance version, proxy mode, connection and traffic state, and manage subscription groups with update and speed-test actions.
 
+### Usage page
+
+| Android usage (30 days) | Android usage trend (30 days) |
+| --- | --- |
+| ![Android usage](docs/screenshots/13-用量页-Android-30天.png) | ![Android usage trend](docs/screenshots/14-用量趋势-Android-30天.png) |
+
+| Web usage (desktop, 30 days) | Web usage (mobile, 30 days) |
+| --- | --- |
+| ![Web desktop usage](docs/screenshots/15-用量页-Web桌面-30天.png) | ![Web mobile usage](docs/screenshots/16-用量页-Web移动端-30天.png) |
+
+- **Usage**: the former Models tab is now Usage, with 1-day, 7-day, and 30-day windows showing models that received calls, request counts, and tokens.
+- **Distribution and trend**: the ring-shaped model distribution and request ranking follow sub2api's information structure. The chart uses Fritsch-Carlson monotone cubic interpolation, two series with 8% area fills for requests and tokens, and edge-aligned first and last points.
+- **Read-only and resilient**: the backend aggregates through read-only SQLite queries and maintains a 300-second snapshot with single-flight refresh and a persisted stale fallback, so a database interruption does not blank the page.
+- **No cost display**: the Web and Android usage pages remove fees, monetary amounts, quota, and dollar metrics entirely, showing only requests and tokens. Screenshots preserve the user-provided framing and dimensions and only have image metadata removed; model names, request counts, and token totals are accepted for this release.
+
 ## Repository layout
 
 - `backend/api_server.py` — Python 3.11 backend entry point.
 - `backend/web/` — the actual single-page Web UI, served same-origin by the backend; no Node build step.
 - `backend/collectors/` — upstream adapters and optional collection jobs.
-- `HADashboard/` — Android v236/236.0, package `io.github.nasmonitor.app`, JDK 17 / SDK 34 / Gradle 8.7.
+- `HADashboard/` — Android v238/238.0, package `io.github.nasmonitor.app`, JDK 17 / SDK 34 / Gradle 8.7.
 - `docs/需求规格.md` and `docs/assets/` — functional spec and architecture diagrams. Pseudocode in the spec is not an entry point.
 - [Configuration & Credentials](docs/配置与凭据获取说明.md) — what each setting does, how to obtain it, and where it may be stored.
 - [Environment Survey Sheet](docs/环境勘察表.example.md) — a template for recording your own topology.

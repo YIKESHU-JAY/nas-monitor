@@ -516,6 +516,9 @@ object ApiClient {
     suspend fun getNewApiPerformance(): NewApiPerformanceResponse = withContext(Dispatchers.IO) {
         gson.fromJson(get("/api/newapi/performance"), NewApiPerformanceResponse::class.java)
     }
+    suspend fun getNewApiModelUsage(): NewApiModelUsage = withContext(Dispatchers.IO) {
+        gson.fromJson(get("/api/newapi/model-usage"), NewApiModelUsage::class.java)
+    }
     suspend fun getNewApiBalance(): NewApiBalance = withContext(Dispatchers.IO) {
         gson.fromJson(get("/api/newapi/balance"), NewApiBalance::class.java)
     }

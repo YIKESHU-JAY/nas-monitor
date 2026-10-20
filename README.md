@@ -1,4 +1,4 @@
-# NAS Monitor 源码交付（v236）
+# NAS Monitor 源码交付（v238）
 
 [English](README.en.md) · 中文
 
@@ -40,12 +40,27 @@ GitHub 工作流仅手动触发；上传源码不会自动构建 APK 或发布�
 - **机场看板**：展示主代理与备代理双实例的连接数、订阅余量、已用比例和实时上下行趋势。
 - **Mihomo 代理**：查看实例版本、代理模式、连接与流量状态，管理订阅节点组并支持更新和测速。
 
+### 用量页
+
+| Android 用量页（30 天） | Android 用量趋势（30 天） |
+| --- | --- |
+| ![Android 用量页](docs/screenshots/13-用量页-Android-30天.png) | ![Android 用量趋势](docs/screenshots/14-用量趋势-Android-30天.png) |
+
+| Web 用量页（桌面 30 天） | Web 用量页（移动端 30 天） |
+| --- | --- |
+| ![Web 桌面用量页](docs/screenshots/15-用量页-Web桌面-30天.png) | ![Web 移动端用量页](docs/screenshots/16-用量页-Web移动端-30天.png) |
+
+- **用量**：原“模型”Tab 已替换为“用量”，提供 1 天、7 天、30 天窗口，展示有调用的模型、请求数与 Token。
+- **分布与趋势**：环形模型分布和请求排行参考 sub2api 的信息结构；趋势使用 Fritsch-Carlson 单调三次插值，请求数和 Token 双序列各叠加 8% 面积填充，首尾点贴边。
+- **只读与降级**：后端以只读 SQLite 聚合统计，300 秒快照、single-flight 刷新和持久化 stale 快照避免数据库抖动导致页面空白。
+- **无费用展示**：Web 与 Android 用量页完全移除费用、金额、quota 和美元指标，只展示请求数与 Token。截图保持用户提供的原始画面和尺寸，仅清除图片元数据；图中的模型名、请求数和 Token 属于本轮明确接受的展示范围。
+
 ## 包内结构
  
 - `backend/api_server.py`：Python 3.11 后端入口。
 - `backend/web/`：实际 Web 单页，后端同源托管，无需 Node 构建。
 - `backend/collectors/`：上游适配与可选采集任务。
-- `HADashboard/`：Android v236/236.0，包名 `io.github.nasmonitor.app`，JDK 17 / SDK 34 / Gradle 8.7。
+- `HADashboard/`：Android v238/238.0，包名 `io.github.nasmonitor.app`，JDK 17 / SDK 34 / Gradle 8.7。
 - `docs/需求规格.md` 与 `docs/assets/`：功能需求与结构图。需求文档中的伪代码不是启动入口。
 - [配置与凭据获取说明](docs/配置与凭据获取说明.md)：配置作用、获取方式与保管边界。
 - [环境勘察表](docs/环境勘察表.example.md)：让接收方填写自己的服务拓扑。

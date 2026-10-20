@@ -46,8 +46,8 @@
   },
   {
     "path": "CHANGELOG.md",
-    "size": 4106,
-    "sha256": "44076bdf8ba7784cc837a75ee764095796d636f85d61762bd8128fb9801c2888"
+    "size": 5983,
+    "sha256": "cf612855137df1530bd345b3efd5c7891cd01df181b7b89459d126b5d1b76425"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -62,7 +62,7 @@
   {
     "path": "HADashboard/app/build.gradle.kts",
     "size": 3491,
-    "sha256": "5ccb9aa4bde7962895722ea26262a6b31a618b6fd3bcce431e3eaa180fbb35d3"
+    "sha256": "258607e340a66df11947d5ec079e01de2c8389326c7feb6fb4789ef48faa51c2"
   },
   {
     "path": "HADashboard/app/src/main/AndroidManifest.xml",
@@ -146,8 +146,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/data/ApiClient.kt",
-    "size": 33371,
-    "sha256": "5c35631bcfd09cdd2af8641aa50d256492e27edb7df3f4fb726bbc96a3e55f9c"
+    "size": 33549,
+    "sha256": "9e646ffd1d62f08b9dd09535ac1fbd4d0825693f604110ee2f4f765ae637ab47"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/data/DownloaderClient.kt",
@@ -156,8 +156,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/data/Models.kt",
-    "size": 24558,
-    "sha256": "e55365501668be580ffc840586367194b8e7f7c1b98a9851b177973da9a06b29"
+    "size": 25801,
+    "sha256": "797a1b4449c50c63d61ee3bddbe2bfe9dfa97f33de49d6a75eca5a5e2252ce06"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/data/QbittorrentClient.kt",
@@ -201,8 +201,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/GatewayScreen.kt",
-    "size": 99564,
-    "sha256": "14b60cc096776269c9d75434933dca81aee49d524792a870f7689b3039b05e94"
+    "size": 113827,
+    "sha256": "5b584ec7a3df987ca3f29e6a8f71096ea1b75c805c37f32f3cd6a995d30304a6"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/KnowledgeArchiveScreen.kt",
@@ -236,8 +236,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/RouterScreen.kt",
-    "size": 20339,
-    "sha256": "995392c115cf33e79e54291c3128470a1508c991a11bfe1ee2ac1a80b860a287"
+    "size": 20408,
+    "sha256": "149886fd1a210e9be7a286f0a293fc90fa42cdb33c7d9cc195c26d49f6d54d74"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/SSHScreen.kt",
@@ -506,13 +506,13 @@
   },
   {
     "path": "README.en.md",
-    "size": 8003,
-    "sha256": "af2bd77170dc3c9767b4de708a86d056a438f03b2c09e69a5d66d7eef3c8a269"
+    "size": 9471,
+    "sha256": "17434183a55edd6ff77ef852982ef3aae7caa0abd2fa181841a3b98b254a3a30"
   },
   {
     "path": "README.md",
-    "size": 6901,
-    "sha256": "eb96b2b45c00befc0c94d80f576a847c8138f46f68adc1cfa0f5066d5f2f62c1"
+    "size": 8226,
+    "sha256": "bcb138447bdb88353451accec22ea15a41e0bb4826f3e0a390d84dc2bc77d2be"
   },
   {
     "path": "backend/.dockerignore",
@@ -521,8 +521,8 @@
   },
   {
     "path": "backend/.env.example",
-    "size": 5018,
-    "sha256": "2636fed090c744b3e60956a6b79b97462cbe73329449c3ef0cf67b78b38b8333"
+    "size": 5170,
+    "sha256": "98880a6bd7a08f057c766f4b583b489da83c5bb1ee12d14e80e5e1d59fc45e34"
   },
   {
     "path": "backend/.gitignore",
@@ -541,8 +541,8 @@
   },
   {
     "path": "backend/api_server.py",
-    "size": 158939,
-    "sha256": "dd41b55843de5d8146275df461f00a0953a026f5263ce9e1d2503498d220c631"
+    "size": 159147,
+    "sha256": "57f9e31738748517f26c1ffcf15ddcead3bf1a1bf747d10b2ea907dba52aaf6e"
   },
   {
     "path": "backend/backend_scheduler.py",
@@ -597,7 +597,7 @@
   {
     "path": "backend/collectors/speedtest.py",
     "size": 10509,
-    "sha256": "5a1d6a34555443dfc871ad912076c953f62c28b33d2c2cffc6b518e20df9ee5e"
+    "sha256": "ddad92edf9be3260d0fab486a5c5fd615fc872db6266696b1248d4dec1f3d153"
   },
   {
     "path": "backend/collectors/status_store.py",
@@ -607,7 +607,7 @@
   {
     "path": "backend/collectors/workbuddy_activity.py",
     "size": 10653,
-    "sha256": "f461912279cda3f3570e3d006e0c7b0837d2cbe41beda973bbb9c798b2181962"
+    "sha256": "98c4d28a85b73c7ac167919a0adeae4bdc1851b66868cca71e5aa8cefdbce7e8"
   },
   {
     "path": "backend/collectors/workbuddy_cap_2359.py",
@@ -620,9 +620,14 @@
     "sha256": "493e24678800413b89bc429f959ffcbddb2e683aa67db5f6f6cc76a99c91e60e"
   },
   {
+    "path": "backend/docker-compose.yml",
+    "size": 4688,
+    "sha256": "d559fa34802d48e77e48b86039417c18f332ebedbcb81654a28a72db98b6c46b"
+  },
+  {
     "path": "backend/gateway_api.py",
-    "size": 33669,
-    "sha256": "12064c882ef00ab077f2b15313b87b5b51670c21db0b7040e32fa29e1bd25a32"
+    "size": 47454,
+    "sha256": "df66b642bcff525c58177cce7f6e03da4b17b154eec04f344a96717056be6ea4"
   },
   {
     "path": "backend/migrate_server_registry.py",
@@ -670,6 +675,11 @@
     "sha256": "4f93a5ebdd6f5b90795814cfae3147633d40560c4af2a519050186734bb8bac9"
   },
   {
+    "path": "backend/test_gateway_usage.py",
+    "size": 11662,
+    "sha256": "66a08d21b655e6a9a9e8dcb076035358ca5c634b56a3ab263bed421a3c2bd4ae"
+  },
+  {
     "path": "backend/test_mihomo_api.py",
     "size": 9621,
     "sha256": "055e6e466194c6d3dde4c71c338818e9e723bf4c4ab42bab09cf235614ab02b5"
@@ -701,13 +711,13 @@
   },
   {
     "path": "backend/test_workbuddy_groups.py",
-    "size": 11562,
-    "sha256": "18ae03b0967d53c63263396bb24f063ddd11d9d23d62d85ab53bcca60151ef5f"
+    "size": 11554,
+    "sha256": "83dce603f636ea2ee59f31fd1234b9e28d64e3799906a306d3164b68d5582696"
   },
   {
     "path": "backend/web/app.js",
-    "size": 137263,
-    "sha256": "0db0c118304788f21ff122cfd51004821e6088117f1a7b5038d0aed27c757335"
+    "size": 145258,
+    "sha256": "06fc698bd77a60a17bb90493cac6fdf37a613948c9ff404a353b3cf0d5919259"
   },
   {
     "path": "backend/web/bootstrap.html",
@@ -721,8 +731,8 @@
   },
   {
     "path": "backend/web/style.css",
-    "size": 47843,
-    "sha256": "4af56697da5e2ca3d15babdc08af628d7b4380137180693a51c1454805dee7f7"
+    "size": 52422,
+    "sha256": "d893f071d5ace26e58e6f39fce89a58bd7e278a0a2a913dc04ddec6250a30f1e"
   },
   {
     "path": "docker-compose.docker.yml",
@@ -813,6 +823,26 @@
     "path": "docs/screenshots/12-代理设置.jpg",
     "size": 214668,
     "sha256": "22c1faab89cf2e68527ca3d08bdc56c4918dbac831b6b91341bd03492093257d"
+  },
+  {
+    "path": "docs/screenshots/13-用量页-Android-30天.png",
+    "size": 144706,
+    "sha256": "9aeb83f711a4c434b5198a90a3f8c14766e850fee97f6dae4092dfe3c5b4d33a"
+  },
+  {
+    "path": "docs/screenshots/14-用量趋势-Android-30天.png",
+    "size": 143535,
+    "sha256": "81c45ffdf56096c4521ab9604f959a503deab861b406f6c0ecd941d1bc892512"
+  },
+  {
+    "path": "docs/screenshots/15-用量页-Web桌面-30天.png",
+    "size": 184855,
+    "sha256": "79e76cf9f184a51c263c20b89f3ddb31c57fd288c532258f8c10f23585a4ec62"
+  },
+  {
+    "path": "docs/screenshots/16-用量页-Web移动端-30天.png",
+    "size": 146385,
+    "sha256": "2341d869256ca6fadd03987689baa6f8f7d1f8fffd67b4a2d0adbbb81136a30c"
   },
   {
     "path": "docs/源码交付审查报告.md",

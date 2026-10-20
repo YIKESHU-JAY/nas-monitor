@@ -478,6 +478,45 @@ data class NewApiBoundChannel(val name: String = "", val type: Int = 0)
 data class NewApiModelPerformance(val model:String="",val requests:Int=0,val success:Int=0,val failed:Int=0,@com.google.gson.annotations.SerializedName("client_cancelled") val clientCancelled:Int=0,val unknown:Int=0,@com.google.gson.annotations.SerializedName("success_rate") val successRate:Double=0.0,@com.google.gson.annotations.SerializedName("avg_use_time") val avgUseTime:Double=0.0,@com.google.gson.annotations.SerializedName("avg_frt") val avgFrt:Double?=null)
 data class NewApiGatewayOverview(val channels:List<NewApiChannel> = emptyList(),val models:List<NewApiModelPerformance> = emptyList(),@com.google.gson.annotations.SerializedName("requests_24h") val requests24h:Int?=null,@com.google.gson.annotations.SerializedName("recent_requests") val recentRequests:Int=0,@com.google.gson.annotations.SerializedName("disabled_channels") val disabledChannels:Int=0,@com.google.gson.annotations.SerializedName("auto_banned_channels") val autoBannedChannels:Int=0,@com.google.gson.annotations.SerializedName("rpm") val rpm:Int?=null)
 data class NewApiPerformanceResponse(val models:List<NewApiModelPerformance> = emptyList(),val window:String="24h",@com.google.gson.annotations.SerializedName("generated_at") val generatedAt:String?=null)
+data class NewApiUsageModel(
+    val model: String = "",
+    val requests: Long = 0,
+    val tokens: Long = 0,
+    val errors: Long = 0,
+    @SerializedName("avg_use_time") val avgUseTime: Double = 0.0
+)
+data class NewApiUsageWindow(
+    val label: String = "",
+    val days: Int = 0,
+    val start: Long = 0,
+    val end: Long = 0,
+    @SerializedName("start_date") val startDate: String = "",
+    @SerializedName("end_date") val endDate: String = "",
+    val models: List<NewApiUsageModel> = emptyList()
+)
+data class NewApiUsageDaily(
+    val date: String = "",
+    val model: String = "",
+    val requests: Long = 0,
+    val tokens: Long = 0
+)
+data class NewApiUsageCoverage(
+    val complete: Boolean = false,
+    val rows: Long = 0,
+    @SerializedName("scan_limit") val scanLimit: Long = 0,
+    val start: Long = 0,
+    val end: Long = 0,
+    val timezone: String = "",
+    val error: String? = null
+)
+data class NewApiModelUsage(
+    val windows: Map<String, NewApiUsageWindow> = emptyMap(),
+    val daily: List<NewApiUsageDaily> = emptyList(),
+    @SerializedName("generated_at") val generatedAt: String = "",
+    val source: String = "",
+    val stale: Boolean = false,
+    val coverage: NewApiUsageCoverage = NewApiUsageCoverage()
+)
 data class NewApiAffinityCache(val enabled:Boolean=false,val total:Int=0,val unknown:Int=0,@com.google.gson.annotations.SerializedName("cache_capacity") val cacheCapacity:Int=0,@com.google.gson.annotations.SerializedName("cache_algo") val cacheAlgo:String="")
 data class NewApiAffinityState(val enabled:Boolean=false,val cache:NewApiAffinityCache=NewApiAffinityCache())
 data class NewApiRoutingPolicy(

@@ -22,16 +22,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+// 累计流量（非速率）：不带 /s。速率请用 formatRate。
 @Composable
 fun formatBytes(bytes: Long): String = when {
-    bytes >= 1024L * 1024 * 1024 -> "${String.format("%.2f", bytes.toDouble() / 1024 / 1024 / 1024)} GB/s"
-    bytes >= 1024L * 1024 -> "${String.format("%.2f", bytes.toDouble() / 1024 / 1024)} MB/s"
-    bytes >= 1024L -> "${String.format("%.1f", bytes.toDouble() / 1024)} KB/s"
-    else -> "${bytes} B/s"
+    bytes >= 1024L * 1024 * 1024 -> "${String.format("%.2f", bytes.toDouble() / 1024 / 1024 / 1024)} GB"
+    bytes >= 1024L * 1024 -> "${String.format("%.2f", bytes.toDouble() / 1024 / 1024)} MB"
+    bytes >= 1024L -> "${String.format("%.1f", bytes.toDouble() / 1024)} KB"
+    else -> "$bytes B"
 }
 
 @Composable
-fun formatRate(bytes: Long): String = if (bytes <= 0) "--" else formatBytes(bytes)
+fun formatRate(bytes: Long): String = if (bytes <= 0) "--" else "${formatBytes(bytes)}/s"
 
 @Composable
 fun RouterScreen(onBack: () -> Unit) {

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,7 +25,7 @@ import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material3.*
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
@@ -35,6 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,6 +60,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private data class GatewayNavItem(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 private val gatewayNavItems = listOf(
@@ -62,7 +68,7 @@ private val gatewayNavItems = listOf(
     GatewayNavItem("性能", Icons.Default.Storage),
     GatewayNavItem("日志", Icons.Default.List),
     GatewayNavItem("渠道", Icons.Default.SettingsEthernet),
-    GatewayNavItem("模型", Icons.Default.PowerSettingsNew)
+    GatewayNavItem("用量", Icons.Default.BarChart)
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, androidx.compose.material.ExperimentalMaterialApi::class)
@@ -94,8 +100,11 @@ fun GatewayScreen(nav: NavHostController) {
     var pendingChannel by remember { mutableStateOf<NewApiChannel?>(null) }
     var pendingRouting by remember { mutableStateOf<Pair<NewApiChannel, String>?>(null) }
     var restoreRoutingPending by remember { mutableStateOf(false) }
-    var models by remember { mutableStateOf<List<NewApiModelMeta>?>(null) }
-    var pendingModel by remember { mutableStateOf<NewApiModelMeta?>(null) }
+    var usage by remember { mutableStateOf<NewApiModelUsage?>(null) }
+    var usageLoading by remember { mutableStateOf(false) }
+    var usageError by remember { mutableStateOf<String?>(null) }
+    var usageWindow by rememberSaveable { mutableStateOf("1d") }
+    var lastUsageLoadAt by remember { mutableStateOf(0L) }
     var probe by remember { mutableStateOf<NewApiProbeResponse?>(null) }
     var balance by remember { mutableStateOf<NewApiBalance?>(null) }
     var workbuddyTogglingUid by remember { mutableStateOf<String?>(null) }
@@ -125,11 +134,9 @@ fun GatewayScreen(nav: NavHostController) {
         }
     }
     var overviewLoading by remember { mutableStateOf(false) }
-    var modelsLoading by remember { mutableStateOf(false) }
     var tokensLoading by remember { mutableStateOf(false) }
     var overviewError by remember { mutableStateOf<String?>(null) }
     var logsError by remember { mutableStateOf<String?>(null) }
-    var modelsError by remember { mutableStateOf<String?>(null) }
     var retryAt by remember { mutableStateOf(0L) }
     var lastTokenLoadAt by remember { mutableStateOf(0L) }
     var logLoadJob by remember { mutableStateOf<Job?>(null) }
@@ -148,7 +155,7 @@ fun GatewayScreen(nav: NavHostController) {
     fun saveGatewayCache() {
         GatewayCache.save(context, GatewayCacheSnapshot(
             overview = overview, affinity = affinity, probe = probe,
-            models = models, logs = logs, logPage = logPage
+            models = null, logs = logs, logPage = logPage
         ))
     }
 
@@ -228,21 +235,21 @@ fun GatewayScreen(nav: NavHostController) {
             }
         }
     }
-    fun loadModels() = scope.launch {
-        if (modelsLoading) return@launch
-        retryMessage()?.let { modelsError = it; pullRefreshing = false; return@launch }
-        modelsLoading = true
-        loading = true
+    fun loadUsage(silent: Boolean = false) = scope.launch {
+        if (usageLoading) return@launch
+        retryMessage()?.let { usageError = it; pullRefreshing = false; return@launch }
+        usageLoading = true
+        if (!silent) loading = true
         try {
-            models = ApiClient.getNewApiModels()
-            modelsError = null
-            saveGatewayCache()
+            usage = ApiClient.getNewApiModelUsage()
+            usageError = null
+            lastUsageLoadAt = System.currentTimeMillis()
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            modelsError = "模型列表加载失败：${loadFailure(t)}"
+            usageError = "用量统计加载失败：${loadFailure(t)}"
         } finally {
-            modelsLoading = false
-            loading = false
+            usageLoading = false
+            if (!silent) loading = false
             pullRefreshing = false
         }
     }
@@ -334,7 +341,6 @@ fun GatewayScreen(nav: NavHostController) {
             overview = cached.overview
             affinity = cached.affinity
             probe = cached.probe
-            models = cached.models
         }
         loadOverview()
     }
@@ -343,7 +349,7 @@ fun GatewayScreen(nav: NavHostController) {
         val logStale = System.currentTimeMillis() - lastLogLoadAt > 30_000
         if (page == 2 && (logs == null || logStale)) loadLogs(logPage)
         if (page == 2 && System.currentTimeMillis() - lastTokenLoadAt > 60_000) loadLogTokens()
-        if (page == 4 && models == null) loadModels()
+        if (page == 4 && (usage == null || System.currentTimeMillis() - lastUsageLoadAt > 120_000)) loadUsage()
         // 性能页（1）直接消费模型统计；概览（0）的成功率也依赖同一份数据，
         // 因此首次进入这两个页面时按需加载，而不是只在“模型”页加载。
         if (page in listOf(0, 1) && performance == null) loadPerformance(silent = page == 0)
@@ -382,7 +388,7 @@ fun GatewayScreen(nav: NavHostController) {
                     when (selectedTab) {
                         2 -> { loadLogs(logPage); loadLogTokens() }
                         1 -> loadPerformance()
-                        4 -> { loadModels(); loadPerformance() }
+                        4 -> loadUsage()
                         else -> loadOverview()
                     }
                 }
@@ -477,7 +483,14 @@ fun GatewayScreen(nav: NavHostController) {
                             }
                         }
                     )
-                    else -> GatewayModelsPage(models, performance, loading || opRunning != null, onToggle = { pendingModel = it })
+                    else -> GatewayUsagePage(
+                        data = usage,
+                        window = usageWindow,
+                        loading = usageLoading,
+                        error = usageError,
+                        onWindow = { usageWindow = it },
+                        onRetry = { loadUsage() }
+                    )
                 }
             }
                 PullRefreshIndicator(
@@ -493,34 +506,10 @@ fun GatewayScreen(nav: NavHostController) {
             }
             (error ?: when (selectedTab) {
                 2 -> logsError
-                4 -> modelsError
+                4 -> usageError
                 else -> overviewError
             })?.let { GatewayErrorBanner(it) }
         }
-    }
-
-    pendingModel?.let { model ->
-        val enabling = model.status != 1
-        CompactConfirmationDialog(
-            containerColor = OverlaySurface,
-            onDismissRequest = { pendingModel = null },
-            title = { Text("确认${if (enabling) "启用" else "禁用"}模型？") },
-            text = { Text("${model.modelName}\n" + if (enabling) "启用后，该模型将恢复为可用模型；实际调用仍取决于渠道状态。" else "禁用后，该模型将不可调用；渠道配置不会删除。") },
-            confirmButton = { TextButton(enabled = opRunning == null, onClick = {
-                scope.launch {
-                    val operation = "model-${model.id}"
-                    if (!beginOperation(operation)) return@launch
-                    try {
-                        val updated = ApiClient.setNewApiModelStatus(model.id, if (enabling) 1 else 0)
-                        models = (models ?: emptyList()).map { if (it.id == updated.id) updated else it }
-                        error = null
-                    } catch (t: Throwable) {
-                        error = "模型状态更新失败：${t.message ?: t.javaClass.simpleName}"
-                    } finally { pendingModel = null; endOperation(operation) }
-                }
-            }) { Text(if (enabling) "确认启用" else "确认禁用", color = if (enabling) Blue else Red) } },
-            dismissButton = { TextButton(onClick = { pendingModel = null }) { Text("取消") } }
-        )
     }
 
     pendingRouting?.let { (channel, mode) ->
@@ -1520,50 +1509,363 @@ private fun GatewayLogPage(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GatewayModelsPage(
-    rows: List<NewApiModelMeta>?,
-    performance: List<NewApiModelPerformance>?,
+private fun GatewayUsagePage(
+    data: NewApiModelUsage?,
+    window: String,
     loading: Boolean,
-    onToggle: (NewApiModelMeta) -> Unit
+    error: String?,
+    onWindow: (String) -> Unit,
+    onRetry: () -> Unit
 ) {
-    // 常用模型 = 当前启用的模型；24h 有调用的排在前面并显示调用量。
-    // 已禁用且近期无调用的模型不展示，避免把“模型管理”变成全量清单。
-    val usage = performance.orEmpty().associateBy { it.model }
-    val visible = rows.orEmpty()
-        .filter { it.status == 1 || usage.containsKey(it.modelName) }
-        .sortedWith(compareByDescending<NewApiModelMeta> { usage[it.modelName]?.requests ?: 0 }
-            .thenByDescending { it.status == 1 })
+    val labels = listOf("1d" to "最近 1 天", "7d" to "最近 7 天", "30d" to "最近 30 天")
+    val current = data?.windows?.get(window)
+    val models = current?.models.orEmpty()
+    val requests = models.sumOf { it.requests }
+    val tokens = models.sumOf { it.tokens }
+    var selectedTrendIndex by remember(window, data) { mutableStateOf<Int?>(null) }
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 16.dp),
         contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp + LocalFloatingNavigationPadding.current),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        if (rows == null) item { GatewayEmpty("正在读取模型状态…") }
-        if (rows != null && visible.isEmpty()) item { GatewayEmpty("暂无常用模型") }
-        if (visible.isNotEmpty()) {
-            item { Text("常用模型 · 近 24 小时", color = Muted, fontSize = 11.sp) }
-            item { Text("此开关只更新模型目录状态，不会从 /v1/models 隐藏，也不阻止实际调用。", color = Subtle, fontSize = 10.sp) }
-        }
-        items(visible, key = { it.id }) { model ->
-            val enabled = model.status == 1
-            val used = usage[model.modelName]?.requests ?: 0
-            CompactCard {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        item {
+            GatewayCard {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(model.modelName, color = Ink, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("模型用量", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                        if (current != null) {
+                            Text("${current.startDate} 至 ${current.endDate} · 按请求数排序", color = Muted, fontSize = 10.sp)
+                        }
+                    }
+                    if (data != null) {
                         Text(
-                            buildString {
-                                append(if (enabled) "已启用" else "已禁用")
-                                if (used > 0) append(" · 24h $used 次")
+                            when {
+                                data.stale -> "旧快照"
+                                data.source == "sqlite" -> "实时快照"
+                                else -> "降级数据"
                             },
-                            color = if (enabled) Green else Muted, fontSize = 11.sp
+                            color = if (data.source == "sqlite" && !data.stale) Green else Amber,
+                            fontSize = 10.sp
                         )
                     }
-                    CompactAction(if (enabled) "禁用" else "启用", if (enabled) Red else Blue, enabled = !loading) { onToggle(model) }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    labels.forEach { (key, label) ->
+                        FilterChip(
+                            selected = window == key,
+                            onClick = { onWindow(key) },
+                            label = { Text(label, maxLines = 1, fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    UsageSummaryMetric("请求数", formatUsageCompact(requests), Blue, Modifier.weight(1f))
+                    UsageSummaryMetric("Token 数", formatUsageCompact(tokens), Green, Modifier.weight(1f))
+                    UsageSummaryMetric("活跃模型", models.size.toString(), Purple, Modifier.weight(1f))
+                }
+                if (data?.coverage?.complete == false) {
+                    Text("当前为降级分页的部分结果", color = Amber, fontSize = 10.sp)
                 }
             }
         }
+        if (data == null) {
+            item {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    GatewayEmpty(if (loading) "正在加载用量统计…" else (error ?: "暂无用量数据"))
+                    if (!loading) {
+                        TextButton(onClick = onRetry) { Text("重试") }
+                    }
+                }
+            }
+        } else if (models.isEmpty()) {
+            item { GatewayEmpty("该窗口暂无模型调用记录") }
+        } else {
+            item { UsageDistributionCard(models) }
+            item {
+                UsageTrendCard(
+                    daily = data.daily,
+                    startDate = current?.startDate.orEmpty(),
+                    selectedIndex = selectedTrendIndex,
+                    onSelect = { selectedTrendIndex = it }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UsageSummaryMetric(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
+    Column(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+            .background(Track.copy(alpha = 0.55f)).padding(10.dp)
+    ) {
+        Text(
+            value, color = color, fontSize = if (value.length > 8) 13.sp else 16.sp,
+            fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(label, color = Muted, fontSize = 10.sp, maxLines = 1)
+    }
+}
+
+private fun formatUsageCount(value: Long): String = when {
+    value >= 100_000_000L -> "${"%.2f".format(Locale.US, value / 100_000_000.0)} 亿"
+    value >= 10_000L -> "${"%.1f".format(Locale.US, value / 10_000.0)} 万"
+    else -> "%,d".format(Locale.US, value)
+}
+
+private fun formatUsageCompact(value: Long): String = when {
+    value >= 100_000_000L -> "${"%.2f".format(Locale.US, value / 100_000_000.0)}亿"
+    value >= 10_000L -> "${(value / 10_000.0).roundToInt()}万"
+    else -> "%,d".format(Locale.US, value)
+}
+
+private val usagePalette = listOf(
+    Color(0xFF3B82F6), Color(0xFF10B981), Color(0xFFF59E0B), Color(0xFFEF4444),
+    Color(0xFF8B5CF6), Color(0xFFEC4899), Color(0xFF14B8A6)
+)
+
+@Composable
+private fun UsageDistributionCard(models: List<NewApiUsageModel>) {
+    GatewayCard {
+        Text("模型分布", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        Text("按请求数占比", color = Muted, fontSize = 11.sp)
+        Spacer(Modifier.height(12.dp))
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth >= 360.dp) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    UsageDonut(models, Modifier.size(192.dp))
+                    Spacer(Modifier.width(16.dp))
+                    UsageModelTable(models, Modifier.weight(1f))
+                }
+            } else {
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 300.dp)
+                        .verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    UsageDonut(models, Modifier.size(150.dp))
+                    Spacer(Modifier.height(8.dp))
+                    UsageModelTable(models, Modifier.fillMaxWidth().heightIn(max = 140.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UsageDonut(models: List<NewApiUsageModel>, modifier: Modifier) {
+    val total = models.sumOf { it.requests }.coerceAtLeast(1L)
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize().padding(8.dp)) {
+            val stroke = 16.dp.toPx()
+            val diameter = size.minDimension - stroke
+            val topLeft = androidx.compose.ui.geometry.Offset(
+                (size.width - diameter) / 2f, (size.height - diameter) / 2f
+            )
+            val arcSize = androidx.compose.ui.geometry.Size(diameter, diameter)
+            drawArc(Track, 0f, 360f, false, topLeft, arcSize, style = Stroke(stroke))
+            var start = -90f
+            models.forEachIndexed { index, item ->
+                val sweep = 360f * item.requests / total
+                if (sweep > 0f) {
+                    drawArc(
+                        usagePalette[index % usagePalette.size], start, (sweep - 1.2f).coerceAtLeast(0.6f), false,
+                        topLeft, arcSize, style = Stroke(stroke, cap = StrokeCap.Butt)
+                    )
+                }
+                start += sweep
+            }
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(formatUsageCount(total), color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("请求", color = Muted, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+private fun UsageModelTable(models: List<NewApiUsageModel>, modifier: Modifier) {
+    Column(modifier) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
+            Text("模型", color = Muted, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            Text("请求数", color = Muted, fontSize = 10.sp, modifier = Modifier.width(58.dp), textAlign = TextAlign.End)
+            Text("Token 数", color = Muted, fontSize = 10.sp, modifier = Modifier.width(66.dp), textAlign = TextAlign.End)
+        }
+        Divider(color = Track, thickness = 0.7.dp)
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 192.dp)) {
+            items(models, key = { it.model }) { item ->
+                val index = models.indexOf(item)
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(usagePalette[index % usagePalette.size]))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        item.model, color = Ink, fontSize = 11.sp,
+                        modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                    Text(formatUsageCount(item.requests), color = Ink, fontSize = 10.sp, modifier = Modifier.width(58.dp), textAlign = TextAlign.End, maxLines = 1)
+                    Text(formatUsageCount(item.tokens), color = Ink, fontSize = 10.sp, modifier = Modifier.width(66.dp), textAlign = TextAlign.End, maxLines = 1)
+                }
+                Divider(color = Track.copy(alpha = 0.55f), thickness = 0.5.dp)
+            }
+        }
+    }
+}
+
+private data class UsageTrendPoint(val label: String, val requests: Long, val tokens: Long)
+
+@Composable
+private fun UsageTrendCard(
+    daily: List<NewApiUsageDaily>,
+    startDate: String,
+    selectedIndex: Int?,
+    onSelect: (Int?) -> Unit
+) {
+    val gridColor = if (isDarkTheme()) Color(0xFF374151) else Color(0xFFE5E7EB)
+    val points = daily.filter { it.date >= startDate }
+        .groupBy { it.date }
+        .map { (date, rows) -> UsageTrendPoint(date.takeLast(5), rows.sumOf { it.requests }, rows.sumOf { it.tokens }) }
+        .sortedBy { it.label }
+    GatewayCard {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column {
+                Text("用量趋势", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text("请求数与 Token 变化", color = Muted, fontSize = 11.sp)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                UsageLegendDot("请求数", usagePalette[0])
+                UsageLegendDot("Token", usagePalette[1])
+            }
+        }
+        if (points.isEmpty()) {
+            Text("该窗口暂无每日数据", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 12.dp))
+            return@GatewayCard
+        }
+        Spacer(Modifier.height(10.dp))
+        Box(Modifier.fillMaxWidth().height(192.dp)) {
+            Canvas(
+                Modifier.fillMaxSize().pointerInput(points) {
+                    detectTapGestures { offset ->
+                        val left = 10.dp.toPx()
+                        val right = size.width - 12.dp.toPx()
+                        val index = ((offset.x - left) / ((right - left).coerceAtLeast(1f)) * (points.size - 1))
+                            .roundToInt().coerceIn(0, points.lastIndex)
+                        onSelect(index)
+                    }
+                }
+            ) {
+                val left = 10.dp.toPx()
+                val right = size.width - 12.dp.toPx()
+                val top = 18.dp.toPx()
+                val bottom = size.height - 28.dp.toPx()
+                val innerWidth = (right - left).coerceAtLeast(1f)
+                val innerHeight = (bottom - top).coerceAtLeast(1f)
+                val maxRequests = points.maxOf { it.requests }.coerceAtLeast(1L)
+                val maxTokens = points.maxOf { it.tokens }.coerceAtLeast(1L)
+                for (i in 0..4) {
+                    val y = top + innerHeight * i / 4f
+                    drawLine(gridColor, androidx.compose.ui.geometry.Offset(left, y), androidx.compose.ui.geometry.Offset(right, y), 1.dp.toPx())
+                }
+                fun coordinates(values: (UsageTrendPoint) -> Long, max: Long): List<androidx.compose.ui.geometry.Offset> =
+                    points.mapIndexed { index, point ->
+                        androidx.compose.ui.geometry.Offset(
+                            left + innerWidth * (if (points.size <= 1) 0f else index.toFloat() / (points.size - 1)),
+                            top + innerHeight * (1f - values(point).toFloat() / max)
+                        )
+                    }
+
+                fun monotonePath(coords: List<androidx.compose.ui.geometry.Offset>): Path {
+                    val path = Path()
+                    if (coords.isEmpty()) return path
+                    path.moveTo(coords.first().x, coords.first().y)
+                    if (coords.size == 1) return path
+                    val slopes = coords.zipWithNext { first, second ->
+                        (second.y - first.y) / (second.x - first.x).coerceAtLeast(0.0001f)
+                    }.toMutableList()
+                    val tangents = MutableList(coords.size) { 0f }
+                    tangents[0] = slopes[0]
+                    tangents[coords.lastIndex] = slopes.last()
+                    for (index in 1 until coords.lastIndex) {
+                        tangents[index] = if (slopes[index - 1] * slopes[index] <= 0f) 0f
+                        else (slopes[index - 1] + slopes[index]) / 2f
+                    }
+                    for (index in 0 until coords.lastIndex) {
+                        if (slopes[index] == 0f) {
+                            tangents[index] = 0f
+                            tangents[index + 1] = 0f
+                        } else {
+                            val a = tangents[index] / slopes[index]
+                            val b = tangents[index + 1] / slopes[index]
+                            val h = kotlin.math.sqrt(a * a + b * b)
+                            if (h > 3f) {
+                                tangents[index] = 3f * slopes[index] * a / h
+                                tangents[index + 1] = 3f * slopes[index] * b / h
+                            }
+                        }
+                    }
+                    for (index in 0 until coords.lastIndex) {
+                        val first = coords[index]
+                        val second = coords[index + 1]
+                        val third = (second.x - first.x) / 3f
+                        path.cubicTo(
+                            first.x + third, first.y + tangents[index] * third,
+                            second.x - third, second.y - tangents[index + 1] * third,
+                            second.x, second.y
+                        )
+                    }
+                    return path
+                }
+
+                fun areaPath(coords: List<androidx.compose.ui.geometry.Offset>): Path {
+                    val path = monotonePath(coords)
+                    if (coords.isNotEmpty()) {
+                        path.lineTo(coords.last().x, bottom)
+                        path.lineTo(coords.first().x, bottom)
+                        path.close()
+                    }
+                    return path
+                }
+
+                val tokenCoords = coordinates({ it.tokens }, maxTokens)
+                val requestCoords = coordinates({ it.requests }, maxRequests)
+                drawPath(areaPath(tokenCoords), usagePalette[1].copy(alpha = 0.08f))
+                drawPath(areaPath(requestCoords), usagePalette[0].copy(alpha = 0.08f))
+                drawPath(monotonePath(tokenCoords), usagePalette[1], style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
+                drawPath(monotonePath(requestCoords), usagePalette[0], style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(points.first().label, color = Muted, fontSize = 10.sp)
+            if (points.size > 2) Text(points[points.size / 2].label, color = Muted, fontSize = 10.sp)
+            Text(points.last().label, color = Muted, fontSize = 10.sp)
+        }
+        selectedIndex?.let { index ->
+            points.getOrNull(index)?.let { point ->
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(point.label, color = Ink, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    Text("请求 ${formatUsageCount(point.requests)}", color = usagePalette[0], fontSize = 10.sp)
+                    Text("Token ${formatUsageCount(point.tokens)}", color = usagePalette[1], fontSize = 10.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UsageLegendDot(label: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(color))
+        Spacer(Modifier.width(4.dp))
+        Text(label, color = Muted, fontSize = 11.sp)
     }
 }
 

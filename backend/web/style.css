@@ -1019,6 +1019,81 @@ textarea:focus-visible,
   margin-top: 3px; padding: 0; border: 0; background: transparent;
   color: var(--accent); font-family: inherit; font-size: 11px; cursor: pointer;
 }
+:root { --usage-grid: #e5e7eb; }
+[data-theme="dark"] { --usage-grid: #374151; }
+.usage-summary,
+.usage-distribution-card,
+.usage-trend-card {
+  padding: 16px; border: 1px solid var(--track); border-radius: 12px;
+  background: var(--card); margin-bottom: 12px; min-width: 0;
+}
+.usage-summary { display: grid; gap: 14px; }
+.usage-summary-head, .usage-card-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0;
+}
+.usage-title, .usage-card-title { font-size: 14px; font-weight: 600; color: var(--ink); }
+.usage-subtitle, .usage-card-caption { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.usage-summary-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.usage-summary-metrics > div { min-width: 0; padding: 10px 12px; border-radius: 8px; background: var(--tint); }
+.usage-summary-metrics strong {
+  display: block; color: var(--ink); font-size: 18px; font-weight: 700;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.usage-summary-metrics span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.usage-segment-wrap {
+  display: flex; gap: 4px; padding: 4px; border-radius: 9px;
+  background: var(--tint); width: fit-content; max-width: 100%;
+}
+.usage-segment {
+  min-height: 32px; padding: 0 14px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 12px;
+  cursor: pointer; white-space: nowrap;
+}
+.usage-segment.active { background: var(--card); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.usage-partial-note { color: var(--amber); font-size: 11px; }
+.usage-distribution { display: grid; grid-template-columns: 192px minmax(0, 1fr); gap: 18px; align-items: center; min-width: 0; margin-top: 14px; }
+.usage-donut { position: relative; width: 192px; height: 192px; }
+.usage-donut svg { width: 100%; height: 100%; display: block; }
+.usage-donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+.usage-donut-center strong { color: var(--ink); font-size: 18px; font-weight: 700; }
+.usage-donut-center span { color: var(--muted); font-size: 10px; }
+.usage-model-table-wrap { min-width: 0; max-height: 192px; overflow: auto; }
+.usage-model-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.usage-model-table th {
+  position: sticky; top: 0; z-index: 1; padding: 0 8px 7px; background: var(--card);
+  color: var(--muted); font-weight: 500; text-align: left; white-space: nowrap;
+}
+.usage-model-table th.num, .usage-model-table td.num { text-align: right; }
+.usage-model-table td { padding: 7px 8px; border-top: 1px solid var(--track); color: var(--ink); white-space: nowrap; }
+.usage-model-table td:first-child { white-space: normal; overflow-wrap: anywhere; }
+.usage-model-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+.usage-model-name { vertical-align: middle; }
+.usage-legend { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.usage-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.usage-legend i { width: 7px; height: 7px; border-radius: 50%; }
+.usage-trend-wrap { position: relative; width: 100%; height: 192px; min-width: 0; margin-top: 10px; }
+.usage-trend { width: 100%; height: 100%; overflow: visible; }
+.usage-trend-hit { cursor: crosshair; }
+.usage-tooltip {
+  display: none; position: absolute; z-index: 2; min-width: 120px; padding: 7px 9px;
+  border: 1px solid var(--track); border-radius: 7px; background: var(--card);
+  color: var(--ink); font-size: 10px; line-height: 1.6; pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0,0,0,.12);
+}
+.usage-tooltip.show { display: block; }
+.usage-tooltip strong { display: block; margin-bottom: 2px; font-size: 11px; }
+.usage-tooltip i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; }
+@media (max-width: 700px) {
+  .usage-summary, .usage-distribution-card, .usage-trend-card { padding: 14px; }
+  .usage-summary-metrics { gap: 5px; }
+  .usage-summary-metrics > div { padding: 8px; }
+  .usage-summary-metrics strong { font-size: 15px; }
+  .usage-segment-wrap { width: 100%; }
+  .usage-segment { flex: 1; padding: 0 8px; }
+  .usage-distribution { grid-template-columns: 1fr; gap: 12px; justify-items: center; }
+  .usage-model-table-wrap { width: 100%; max-height: 220px; }
+  .usage-card-head { flex-wrap: wrap; }
+}
 .ui-section-detail > .card {
   margin-bottom: 8px; padding: 0; border: 0; background: transparent; box-shadow: none;
 }

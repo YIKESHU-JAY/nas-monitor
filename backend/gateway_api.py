@@ -4,6 +4,7 @@ import copy
 import json
 import math
 import os
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -29,6 +30,25 @@ _upstream_lock = threading.RLock()
 _retry_at = 0.0
 READ_CACHE_SECONDS = 60
 LOG_WINDOW_SECONDS = 3600
+MODEL_USAGE_DB = os.environ.get("NEWAPI_DB_PATH", "/new-api-data/new-api.db")
+MODEL_USAGE_WINDOWS = (("1d", 1), ("7d", 7), ("30d", 30))
+MODEL_USAGE_DB_TIMEOUT = 3.0
+MODEL_USAGE_MAX_MODELS = 500
+MODEL_USAGE_MAX_DAILY = 5000
+MODEL_USAGE_CACHE_SECONDS = 300
+MODEL_USAGE_RETRY_SECONDS = 60
+MODEL_USAGE_SNAPSHOT_FILE = Path(os.environ.get(
+    "MODEL_USAGE_SNAPSHOT_FILE", str(_BACKEND_ROOT / "model_usage_snapshot.json")
+))
+_model_usage_lock = threading.RLock()
+_model_usage_condition = threading.Condition(_model_usage_lock)
+_model_usage_snapshot = None
+_model_usage_last_success = 0.0
+_model_usage_last_error = None
+_model_usage_persist_error = None
+_model_usage_next_retry = 0.0
+_model_usage_refreshing = False
+_model_usage_disk_loaded = False
 
 
 class GatewayRateLimited(RuntimeError):
@@ -323,6 +343,341 @@ def _build_performance():
 def performance():
     """Per-model 24h aggregation. Loaded only when the 模型 tab is opened."""
     return _cached_read("performance", _build_performance)
+
+
+def _usage_window_starts(now=None):
+    """Return inclusive local-day cutoffs for the three usage windows."""
+    now = now or datetime.datetime.now().astimezone()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    starts = {}
+    for key, days in MODEL_USAGE_WINDOWS:
+        starts[key] = int((today - datetime.timedelta(days=days - 1)).timestamp())
+    return starts
+
+
+def _usage_window_meta(starts, now=None):
+    now = now or datetime.datetime.now().astimezone()
+    end = int(now.timestamp()) + 1
+    labels = {"1d": "最近 1 天", "7d": "最近 7 天", "30d": "最近 30 天"}
+    return {
+        key: {
+            "label": labels[key],
+            "days": days,
+            "start": starts[key],
+            "end": end,
+            "start_date": datetime.datetime.fromtimestamp(starts[key], now.tzinfo).date().isoformat(),
+            "end_date": now.date().isoformat(),
+        }
+        for key, days in MODEL_USAGE_WINDOWS
+    }
+
+
+def _usage_connection(db_path):
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=MODEL_USAGE_DB_TIMEOUT)
+    connection.execute("PRAGMA query_only = ON")
+    deadline = time.monotonic() + MODEL_USAGE_DB_TIMEOUT
+    connection.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
+    return connection
+
+
+def _sqlite_aggregate(db_path, sql, params, limit):
+    connection = _usage_connection(db_path)
+    try:
+        rows = connection.execute(sql, params).fetchmany(limit + 1)
+        if len(rows) > limit:
+            raise RuntimeError("用量聚合结果超过上限")
+        return rows
+    finally:
+        connection.close()
+
+
+def _load_usage_aggregates_sqlite(db_path, starts, end):
+    base_filter = (
+        "created_at >= ? AND created_at < ? AND type IN (?, ?) "
+        "AND model_name IS NOT NULL AND TRIM(model_name) <> ''"
+    )
+    params = (int(starts["30d"]), int(end), LOG_TYPE_CONSUME, LOG_TYPE_ERROR)
+    model_rows = _sqlite_aggregate(
+        db_path,
+        "SELECT model_name, SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), "
+        "COALESCE(SUM(prompt_tokens + completion_tokens), 0), "
+        "COALESCE(SUM(quota), 0), "
+        "SUM(CASE WHEN type = ? AND created_at >= ? THEN 1 ELSE 0 END), "
+        "COALESCE(SUM(use_time), 0), "
+        "SUM(CASE WHEN created_at >= ? THEN prompt_tokens + completion_tokens ELSE 0 END), "
+        "SUM(CASE WHEN created_at >= ? THEN quota ELSE 0 END), "
+        "SUM(CASE WHEN created_at >= ? THEN use_time ELSE 0 END), "
+        "SUM(CASE WHEN created_at >= ? THEN prompt_tokens + completion_tokens ELSE 0 END), "
+        "SUM(CASE WHEN created_at >= ? THEN quota ELSE 0 END), "
+        "SUM(CASE WHEN created_at >= ? THEN use_time ELSE 0 END), "
+        "SUM(CASE WHEN type = ? AND created_at >= ? THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN type = ? AND created_at >= ? THEN 1 ELSE 0 END) "
+        "FROM logs WHERE " + base_filter +
+        " GROUP BY model_name ORDER BY 2 DESC, model_name ASC LIMIT ?",
+        (
+            int(starts["1d"]), int(starts["7d"]), int(starts["30d"]),
+            LOG_TYPE_ERROR, int(starts["1d"]),
+            int(starts["1d"]), int(starts["1d"]), int(starts["1d"]),
+            int(starts["7d"]), int(starts["7d"]), int(starts["7d"]),
+            LOG_TYPE_ERROR, int(starts["7d"]),
+            LOG_TYPE_ERROR, int(starts["30d"]),
+            *params, MODEL_USAGE_MAX_MODELS + 1,
+        ),
+        MODEL_USAGE_MAX_MODELS,
+    )
+    daily_rows = _sqlite_aggregate(
+        db_path,
+        "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime') AS day, "
+        "model_name, COUNT(*), COALESCE(SUM(prompt_tokens + completion_tokens), 0), "
+        "COALESCE(SUM(quota), 0) FROM logs WHERE " + base_filter +
+        " GROUP BY day, model_name ORDER BY day ASC, model_name ASC LIMIT ?",
+        (*params, MODEL_USAGE_MAX_DAILY + 1),
+        MODEL_USAGE_MAX_DAILY,
+    )
+    windows = {key: [] for key, _ in MODEL_USAGE_WINDOWS}
+    for row in model_rows:
+        name = str(row[0]).strip()
+        values = {
+            "1d": (int(row[1] or 0), int(row[8] or 0), int(row[9] or 0), float(row[10] or 0)),
+            "7d": (int(row[2] or 0), int(row[11] or 0), int(row[12] or 0), float(row[13] or 0)),
+            "30d": (int(row[3] or 0), int(row[4] or 0), int(row[5] or 0), float(row[7] or 0)),
+        }
+        for key, (requests, tokens, quota, use_time_sum) in values.items():
+            if requests <= 0:
+                continue
+            windows[key].append({
+                "model": name, "requests": requests, "tokens": tokens,
+                "quota": quota / 500000.0, "quota_raw": quota,
+                "errors": int(row[6 if key == "1d" else 14 if key == "7d" else 15] or 0),
+                "avg_use_time": round(use_time_sum / requests, 3),
+            })
+    daily = [{
+        "date": str(row[0]), "model": str(row[1]).strip(), "requests": int(row[2] or 0),
+        "tokens": int(row[3] or 0), "quota": int(row[4] or 0) / 500000.0,
+        "quota_raw": int(row[4] or 0),
+    } for row in daily_rows]
+    return windows, daily
+
+
+def _build_model_usage(now=None):
+    now = now or datetime.datetime.now().astimezone()
+    starts = _usage_window_starts(now)
+    window_meta = _usage_window_meta(starts, now)
+    windows, daily = _load_usage_aggregates_sqlite(
+        MODEL_USAGE_DB, starts, window_meta["30d"]["end"]
+    )
+    for models in windows.values():
+        models.sort(key=lambda item: (-item["requests"], item["model"]))
+    return {
+        "windows": {
+            key: {**window_meta[key], "models": windows[key]}
+            for key, _ in MODEL_USAGE_WINDOWS
+        },
+        "daily": daily,
+        "generated_at": now.isoformat(),
+        "source": "sqlite",
+        "stale": False,
+        "coverage": {
+            "complete": True,
+            "rows": sum(item["requests"] for item in windows["30d"]),
+            "model_limit": MODEL_USAGE_MAX_MODELS,
+            "daily_limit": MODEL_USAGE_MAX_DAILY,
+            "start": starts["30d"],
+            "end": window_meta["30d"]["end"],
+            "timezone": str(now.tzinfo),
+            "error": None,
+        },
+    }
+
+
+def _usage_copy(snapshot):
+    return copy.deepcopy(snapshot) if snapshot is not None else None
+
+
+def _load_usage_snapshot_disk():
+    try:
+        raw = json.loads(MODEL_USAGE_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or not isinstance(raw.get("snapshot"), dict):
+            raise ValueError("快照格式无效")
+        saved_at = float(raw.get("saved_at") or 0)
+        wall_age = max(0.0, time.time() - float(raw.get("saved_wall_at") or 0))
+        return raw["snapshot"], time.monotonic() - wall_age
+    except FileNotFoundError:
+        return None, 0.0
+    except Exception as exc:
+        global _model_usage_persist_error
+        _model_usage_persist_error = str(exc)[:240]
+        return None, 0.0
+
+
+def _persist_usage_snapshot(snapshot, now_monotonic):
+    global _model_usage_persist_error
+    target = MODEL_USAGE_SNAPSHOT_FILE
+    temp = target.with_name(target.name + ".tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp.write_text(json.dumps(
+            {"saved_wall_at": time.time(), "snapshot": snapshot},
+            ensure_ascii=False, separators=(",", ":"),
+        ), encoding="utf-8")
+        os.replace(temp, target)
+        _model_usage_persist_error = None
+    except Exception as exc:
+        _model_usage_persist_error = str(exc)[:240]
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _usage_stale_copy(snapshot, error):
+    result = _usage_copy(snapshot)
+    if result is None:
+        return None
+    result["stale"] = True
+    result["source"] = "stale_snapshot"
+    result["coverage"]["complete"] = False
+    result["coverage"]["error"] = str(error)[:240] if error else "缓存刷新失败"
+    result["cache"] = {
+        "state": "stale",
+        "ttl_seconds": MODEL_USAGE_CACHE_SECONDS,
+        "error": str(error)[:240] if error else None,
+    }
+    return result
+
+
+def _usage_live_copy(snapshot, ttl=None):
+    result = _usage_copy(snapshot)
+    result["stale"] = False
+    result["cache"] = {
+        "state": "fresh",
+        "ttl_seconds": ttl or MODEL_USAGE_CACHE_SECONDS,
+        "error": None,
+    }
+    return result
+
+
+def _refresh_model_usage_locked():
+    global _model_usage_snapshot, _model_usage_last_success, _model_usage_last_error
+    global _model_usage_next_retry, _model_usage_refreshing, _model_usage_disk_loaded
+    try:
+        snapshot = _build_model_usage()
+        now = time.monotonic()
+        _model_usage_snapshot = snapshot
+        _model_usage_last_success = now
+        _model_usage_last_error = None
+        _model_usage_next_retry = 0.0
+        _model_usage_disk_loaded = True
+        _persist_usage_snapshot(snapshot, now)
+        return snapshot
+    except Exception as exc:
+        _model_usage_last_error = str(exc)[:240]
+        _model_usage_next_retry = time.monotonic() + MODEL_USAGE_RETRY_SECONDS
+        raise
+    finally:
+        _model_usage_refreshing = False
+        _model_usage_condition.notify_all()
+
+
+def _refresh_model_usage_background():
+    global _model_usage_refreshing
+    try:
+        with _model_usage_condition:
+            _refresh_model_usage_locked()
+    except Exception:
+        pass
+
+
+def reset_model_usage_cache():
+    """Reset process state for tests and explicit operational recovery."""
+    global _model_usage_snapshot, _model_usage_last_success, _model_usage_last_error
+    global _model_usage_next_retry, _model_usage_refreshing, _model_usage_disk_loaded
+    global _model_usage_persist_error
+    with _model_usage_condition:
+        _model_usage_snapshot = None
+        _model_usage_last_success = 0.0
+        _model_usage_last_error = None
+        _model_usage_next_retry = 0.0
+        _model_usage_refreshing = False
+        _model_usage_disk_loaded = False
+        _model_usage_persist_error = None
+
+
+def invalidate_model_usage_cache():
+    """Keep the last success but require the next request to refresh it."""
+    global _model_usage_last_success, _model_usage_next_retry
+    with _model_usage_condition:
+        _model_usage_last_success = 0.0
+        _model_usage_next_retry = 0.0
+
+
+def _start_usage_refresh_locked():
+    global _model_usage_refreshing
+    _model_usage_refreshing = True
+    threading.Thread(
+        target=_refresh_model_usage_background,
+        name="model-usage-refresh",
+        daemon=True,
+    ).start()
+
+
+def _wait_usage_refresh_locked(return_snapshot=False):
+    deadline = time.monotonic() + MODEL_USAGE_DB_TIMEOUT + 1
+    while _model_usage_refreshing and time.monotonic() < deadline:
+        _model_usage_condition.wait(timeout=0.1)
+    if _model_usage_snapshot is not None:
+        if return_snapshot or _model_usage_refreshing:
+            return _usage_live_copy(_model_usage_snapshot)
+        return _usage_live_copy(_model_usage_snapshot)
+    return None
+
+
+def _model_usage_locked():
+    global _model_usage_snapshot, _model_usage_last_success, _model_usage_disk_loaded
+    global _model_usage_refreshing
+    if not _model_usage_disk_loaded:
+        disk_snapshot, saved_at = _load_usage_snapshot_disk()
+        _model_usage_disk_loaded = True
+        if _model_usage_snapshot is None and disk_snapshot is not None:
+            _model_usage_snapshot = disk_snapshot
+            _model_usage_last_success = min(saved_at, time.monotonic() - MODEL_USAGE_CACHE_SECONDS)
+    now = time.monotonic()
+    snapshot = _model_usage_snapshot
+    fresh = snapshot is not None and now - _model_usage_last_success < MODEL_USAGE_CACHE_SECONDS
+    if fresh:
+        return _usage_live_copy(snapshot)
+    if snapshot is not None:
+        if not _model_usage_refreshing and now >= _model_usage_next_retry:
+            _start_usage_refresh_locked()
+        return _usage_stale_copy(snapshot, _model_usage_last_error)
+    if _model_usage_refreshing:
+        return _wait_usage_refresh_locked(return_snapshot=True)
+    _model_usage_refreshing = True
+    try:
+        snapshot = _refresh_model_usage_locked()
+    except Exception:
+        if _model_usage_snapshot is not None:
+            return _usage_stale_copy(_model_usage_snapshot, _model_usage_last_error)
+        raise
+    return _usage_live_copy(snapshot)
+
+
+def model_usage():
+    """300s persistent, single-flight snapshot cache with stale-while-revalidate."""
+    with _model_usage_condition:
+        return _model_usage_locked()
+
+
+def wait_model_usage_refresh(timeout=5.0):
+    """Test/operations hook: wait for a background snapshot refresh to finish."""
+    deadline = time.monotonic() + timeout
+    with _model_usage_condition:
+        while _model_usage_refreshing and time.monotonic() < deadline:
+            _model_usage_condition.wait(timeout=0.05)
+        return not _model_usage_refreshing
 
 
 def _build_overview():

@@ -52,7 +52,7 @@
   // 后台刷新分级：网关探针约 650KB，不能随 10 秒轮询重复下载。
   var BACKGROUND_TTL = {
     overview: 15000, airport: 60000,
-    gwOverview: 60000, gwPerformance: 120000, gwModelsMeta: 60000, gwBalance: 15000, gwProbe: 60000,
+    gwOverview: 60000, gwPerformance: 120000, gwUsage: 120000, gwBalance: 15000, gwProbe: 60000,
     gwAffinity: 60000, gwPolicy: 30000, gwTokens: 60000, gwLogs: 60000,
     mihomoOverview: 30000, mihomoAirports: 30000,
     security: 30000, detail: 30000, router: 15000,
@@ -370,7 +370,7 @@
     ],
     gateway: [
       ["gateway", "概览"], ["gateway/performance", "性能"], ["gateway/logs", "日志"],
-      ["gateway/channels", "渠道"], ["gateway/models", "模型"], ["gateway/proxy", "代理"]
+      ["gateway/channels", "渠道"], ["gateway/models", "用量"], ["gateway/proxy", "代理"]
     ],
     tools: [
       ["tools", "工具"], ["tools/downloader", "下载器"], ["ask", "知识问答"], ["knowledge-archive", "知识归档"]
@@ -632,7 +632,7 @@
   /* ───────────── 页面：网关 ───────────── */
 
   /* ── 网关页 Tab 定义（与 Android gatewayNavItems 对齐） ── */
-  var GATEWAY_TABS = ["概览", "性能", "日志", "渠道", "模型", "代理"];
+  var GATEWAY_TABS = ["概览", "性能", "日志", "渠道", "用量", "代理"];
   var ui = window._ui = window._ui || {};
   function gatewayTab() {
     var slug = currentRoute().split("/")[1];
@@ -646,7 +646,7 @@
     var gw = cache.gwOverview, bal = cache.gwBalance;
     if (!gw && !bal) return renderLoading("正在加载网关数据…");
     var tab = gatewayTab();
-    var bodyFns = [renderGwOverview, renderGwPerf, renderGwLogs, renderGwChannels, renderGwModels, renderGwProxy];
+    var bodyFns = [renderGwOverview, renderGwPerf, renderGwLogs, renderGwChannels, renderGwUsage, renderGwProxy];
     return (bodyFns[tab] || renderGwOverview)();
   }
 
@@ -809,57 +809,188 @@
     return out;
   }
 
-  /* ── Tab 5: 模型 ── */
-  function renderGwModels() {
-    var perf = cache.gwPerformance, probe = cache.gwProbe, meta = cache.gwModelsMeta;
-    var out = "";
-    // 常用模型：启用中的模型；24h 有调用的排前并显示调用量。
-    var usage = {};
-    ((perf && perf.models) || []).forEach(function (m) { usage[m.model] = m.requests || 0; });
-    var common = (((meta && meta.items) || []).filter(function (m) {
-      return m.status === 1 || usage[m.model_name] > 0;
-    })).sort(function (a, b) {
-      return (usage[b.model_name] || 0) - (usage[a.model_name] || 0) || b.status - a.status;
+  /* ── Tab 5: 用量 ── */
+  function renderGwUsage() {
+    var data = cache.gwUsage;
+    if (!data) {
+      return card('<div class="row between"><span class="card-title">模型用量</span>' +
+        '<button class="btn small" data-usage-retry="1">' + icon("refresh", 13) + ' 重试</button></div>' +
+        '<div class="empty caption">用量统计暂不可用，请检查统计接口或稍后重试。</div>');
+    }
+    var windowKey = ui.usageWindow || "1d";
+    var current = (data.windows || {})[windowKey] || {};
+    var models = current.models || [];
+    var totals = models.reduce(function (sum, item) {
+      sum.requests += Number(item.requests) || 0;
+      sum.tokens += Number(item.tokens) || 0;
+      return sum;
+    }, { requests: 0, tokens: 0 });
+    var labels = { "1d": "1 天", "7d": "7 天", "30d": "30 天" };
+    var out = '<div class="usage-summary">' +
+      '<div class="usage-summary-head"><div><div class="usage-title">模型用量</div>' +
+      '<div class="usage-subtitle">' + esc(current.start_date || "--") + ' 至 ' +
+      esc(current.end_date || "--") + '</div></div>' +
+      '<span class="pill ' + (data.stale ? "warn" : data.source === "sqlite" ? "on" : "warn") + '">' +
+      esc(data.stale ? "旧快照" : data.source === "sqlite" ? "实时快照" : "降级数据") + '</span></div>' +
+      '<div class="usage-summary-metrics">' +
+      '<div><strong>' + compactNumber(totals.requests) + '</strong><span>请求数</span></div>' +
+      '<div><strong>' + compactNumber(totals.tokens) + '</strong><span>Token 数</span></div>' +
+      '<div><strong>' + models.length + '</strong><span>活跃模型</span></div>' +
+      '</div></div>' +
+      '<div class="usage-segment-wrap" role="tablist" aria-label="用量时间窗口">' +
+      Object.keys(labels).map(function (key) {
+        return '<button class="usage-segment ' + (windowKey === key ? "active" : "") +
+          '" data-usage-window="' + key + '" role="tab" aria-selected="' +
+          (windowKey === key ? "true" : "false") + '">' + labels[key] + '</button>';
+      }).join("") + '</div>';
+    if (data.coverage && data.coverage.complete === false) {
+      out += '<div class="usage-partial-note">当前为旧快照或部分结果</div>';
+    }
+    if (!models.length) {
+      return out + card('<div class="empty caption">该窗口暂无模型调用记录。</div>');
+    }
+    out += '<div class="usage-distribution-card">' +
+      '<div class="usage-card-head"><div><div class="usage-card-title">模型分布</div>' +
+      '<div class="usage-card-caption">按请求数占比</div></div></div>' +
+      '<div class="usage-distribution">' +
+      renderUsageDonut(models) +
+      '<div class="usage-model-table-wrap"><table class="usage-model-table"><thead><tr>' +
+      '<th>模型</th><th class="num">请求数</th><th class="num">Token 数</th></tr></thead><tbody>' +
+      models.map(function (item, index) {
+        return '<tr><td><span class="usage-model-dot" style="background:' + usagePalette[index % usagePalette.length] + '"></span>' +
+          '<span class="usage-model-name">' + esc(item.model) + '</span></td>' +
+          '<td class="num">' + compactNumber(item.requests) + '</td>' +
+          '<td class="num">' + compactNumber(item.tokens) + '</td></tr>';
+      }).join("") + '</tbody></table></div></div></div>';
+    var daily = (data.daily || []).filter(function (item) {
+      return item.date >= (current.start_date || "");
     });
-    if (common.length) {
-      out += card('<div class="card-title">常用模型</div><div class="spacer-h"></div>' +
-        '<div class="tiny subtle mb-3">此开关只更新模型目录状态，不会从 /v1/models 隐藏，也不阻止实际调用。</div>' +
-        common.map(function (m) {
-          var enabled = m.status === 1;
-          var used = usage[m.model_name] || 0;
-          return '<div class="row between mb-3">' +
-            '<div class="grow"><div class="font-medium wrap-text">' + esc(m.model_name) + '</div>' +
-            '<div class="tiny subtle">' + (enabled ? "已启用" : "已禁用") +
-            (used > 0 ? ' · 24h ' + used + ' 次' : '') + '</div></div>' +
-            '<button class="btn small ' + (enabled ? "danger" : "") + ' model-toggle" data-id="' + m.id +
-            '" data-status="' + (enabled ? 0 : 1) + '">' + (enabled ? "禁用" : "启用") + '</button></div>';
-        }).join(""));
-    }
-    if (perf && (perf.models || []).length) {
-      var models = perf.models;
-      var sorted = models.slice().sort(function (a, b) { return (a.success_rate || 0) - (b.success_rate || 0); });
-      var worst = (ui.modelsExpanded ? sorted : sorted.slice(0, 5));
-      var maxReq = Math.max.apply(null, worst.map(function (m) { return m.requests || 0; })) || 1;
-      out += card('<div class="card-title">模型表现（按成功率升序）</div><div class="spacer-h"></div>' +
-        worst.map(function (m) {
-          var c = usageColor(100 - (m.success_rate || 0));
-          return '<div class="mb-3">' +
-            '<div class="row between caption"><span class="wrap-text">' + esc(m.model) + '</span>' +
-            '<span class="font-semibold" style="color:' + c + '">' + (m.success_rate != null ? m.success_rate.toFixed(1) + "%" : "--") + '</span></div>' +
-            '<div class="bar bar-xs"><i style="width:' + ((m.requests || 0) / maxReq * 100) + '%;background:' + c + '"></i></div>' +
-            '<div class="tiny subtle mt-1">请求 ' + (m.requests || 0) + ' · 成功 ' + (m.success || 0) +
-            ' · 失败 ' + (m.failed || 0) + ' · 客户端取消 ' + (m.client_cancelled || 0) +
-            (m.avg_use_time ? ' · 平均 ' + (m.avg_use_time / 1000).toFixed(1) + 's' : '') + '</div>' +
-            '</div>';
-        }).join("") +
-        (sorted.length > 5 ? '<div class="row between mt-3"><span class="tiny subtle">' +
-          (ui.modelsExpanded ? '已显示全部 ' + sorted.length : '显示表现最弱的 5 / ' + sorted.length) +
-          ' 个模型</span><button class="btn small" data-models-expand="' +
-          (ui.modelsExpanded ? '0' : '1') + '">' + (ui.modelsExpanded ? '收起' : '显示更多') + '</button></div>' : ''));
-    }
-    if (probe) out += renderGwProbe(probe);
-    if (!out) return '<div class="empty caption">暂无模型数据</div>';
+    var byDate = {};
+    daily.forEach(function (item) {
+      if (!byDate[item.date]) byDate[item.date] = { requests: 0, tokens: 0 };
+      byDate[item.date].requests += item.requests || 0;
+      byDate[item.date].tokens += item.tokens || 0;
+    });
+    var dates = Object.keys(byDate).sort();
+    out += renderUsageTrend(dates.map(function (date) {
+      return { label: date.substring(5), requests: byDate[date].requests, tokens: byDate[date].tokens };
+    }));
     return out;
+  }
+
+  var usagePalette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6"];
+
+  function compactNumber(value) {
+    value = Number(value) || 0;
+    if (value >= 100000000) return (value / 100000000).toFixed(2) + " 亿";
+    if (value >= 10000) return (value / 10000).toFixed(1) + " 万";
+    return value.toLocaleString("zh-CN");
+  }
+
+  function renderUsageDonut(models) {
+    var total = models.reduce(function (sum, item) { return sum + (Number(item.requests) || 0); }, 0) || 1;
+    var radius = 52, circumference = 2 * Math.PI * radius, offset = 0;
+    var arcs = models.map(function (item, index) {
+      var ratio = (Number(item.requests) || 0) / total;
+      var length = circumference * ratio;
+      var circle = '<circle cx="64" cy="64" r="' + radius + '" fill="none" stroke="' +
+        usagePalette[index % usagePalette.length] + '" stroke-width="16" stroke-dasharray="' +
+        Math.max(0, length - 2) + ' ' + circumference + '" stroke-dashoffset="' + (-offset) +
+        '" transform="rotate(-90 64 64)"></circle>';
+      offset += length;
+      return circle;
+    }).join("");
+    return '<div class="usage-donut"><svg viewBox="0 0 128 128" role="img" aria-label="模型请求占比">' +
+      '<circle cx="64" cy="64" r="' + radius + '" fill="none" stroke="var(--track)" stroke-width="16"></circle>' +
+      arcs + '</svg><div class="usage-donut-center"><strong>' + compactNumber(total) + '</strong><span>请求</span></div></div>';
+  }
+
+  function monotoneUsagePath(points) {
+    if (!points.length) return "";
+    if (points.length === 1) return "M" + points[0].x + " " + points[0].y;
+    var n = points.length, dx = [], slopes = [], tangents = [];
+    for (var i = 0; i < n - 1; i++) {
+      dx[i] = points[i + 1].x - points[i].x;
+      slopes[i] = (points[i + 1].y - points[i].y) / Math.max(dx[i], 0.0001);
+    }
+    tangents[0] = slopes[0];
+    tangents[n - 1] = slopes[n - 2];
+    for (var j = 1; j < n - 1; j++) {
+      tangents[j] = slopes[j - 1] * slopes[j] <= 0 ? 0 : (slopes[j - 1] + slopes[j]) / 2;
+    }
+    for (var k = 0; k < n - 1; k++) {
+      if (slopes[k] === 0) {
+        tangents[k] = 0;
+        tangents[k + 1] = 0;
+      } else {
+        var a = tangents[k] / slopes[k], b = tangents[k + 1] / slopes[k];
+        var h = Math.sqrt(a * a + b * b);
+        if (h > 3) {
+          tangents[k] = 3 * slopes[k] * a / h;
+          tangents[k + 1] = 3 * slopes[k] * b / h;
+        }
+      }
+    }
+    var path = "M" + points[0].x + " " + points[0].y;
+    for (var p = 0; p < n - 1; p++) {
+      var third = dx[p] / 3;
+      path += " C" + (points[p].x + third) + " " + (points[p].y + tangents[p] * third) +
+        " " + (points[p + 1].x - third) + " " + (points[p + 1].y - tangents[p + 1] * third) +
+        " " + points[p + 1].x + " " + points[p + 1].y;
+    }
+    return path;
+  }
+
+  function usageAreaPath(points, baseline) {
+    if (!points.length) return "";
+    return monotoneUsagePath(points) + " L" + points[points.length - 1].x + " " + baseline +
+      " L" + points[0].x + " " + baseline + " Z";
+  }
+
+  function renderUsageTrend(points) {
+    var cardHead = '<div class="usage-card-head"><div><div class="usage-card-title">用量趋势</div>' +
+      '<div class="usage-card-caption">请求数与 Token 变化</div></div>' +
+      '<div class="usage-legend"><span><i style="background:#3b82f6"></i>请求数</span>' +
+      '<span><i style="background:#10b981"></i>Token</span></div></div>';
+    if (!points.length) return '<div class="usage-trend-card">' + cardHead + '<div class="empty caption">该窗口暂无每日数据。</div></div>';
+    var width = 720, height = 192, pad = { left: 10, right: 12, top: 18, bottom: 28 };
+    var maxRequests = Math.max.apply(null, points.map(function (p) { return p.requests; })) || 1;
+    var maxTokens = Math.max.apply(null, points.map(function (p) { return p.tokens; })) || 1;
+    var innerWidth = width - pad.left - pad.right, innerHeight = height - pad.top - pad.bottom;
+    var requestPoints = points.map(function (point, index) {
+      return { x: pad.left + innerWidth * (points.length <= 1 ? 0 : index / (points.length - 1)),
+        y: pad.top + innerHeight * (1 - point.requests / maxRequests) };
+    });
+    var tokenPoints = points.map(function (point, index) {
+      return { x: pad.left + innerWidth * (points.length <= 1 ? 0 : index / (points.length - 1)),
+        y: pad.top + innerHeight * (1 - point.tokens / maxTokens) };
+    });
+    var grid = "";
+    for (var gi = 0; gi <= 4; gi++) {
+      var y = pad.top + innerHeight * gi / 4;
+      grid += '<line x1="' + pad.left + '" y1="' + y + '" x2="' + (width - pad.right) + '" y2="' + y +
+        '" stroke="var(--usage-grid)" stroke-width="1"></line>';
+    }
+    var ticks = points.length <= 1 ? [0] : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+    var labels = ticks.filter(function (v, i, a) { return a.indexOf(v) === i; }).map(function (index) {
+      return '<text x="' + requestPoints[index].x + '" y="' + (height - 8) +
+        '" text-anchor="middle" font-size="10" fill="var(--subtle)">' + esc(points[index].label) + '</text>';
+    }).join("");
+    var hitWidth = innerWidth / Math.max(1, points.length - 1);
+    var hits = points.map(function (point, index) {
+      return '<rect class="usage-trend-hit" data-usage-index="' + index + '" x="' +
+        Math.max(pad.left, requestPoints[index].x - hitWidth / 2) + '" y="' + pad.top +
+        '" width="' + Math.max(4, hitWidth) + '" height="' + innerHeight + '" fill="transparent"></rect>';
+    }).join("");
+    return '<div class="usage-trend-card">' + cardHead +
+      '<div class="usage-trend-wrap"><svg class="usage-trend" viewBox="0 0 ' + width + ' ' + height +
+      '" preserveAspectRatio="none">' + grid +
+      '<path d="' + usageAreaPath(tokenPoints, height - pad.bottom) + '" fill="#10b981" fill-opacity="0.08" stroke="none"></path>' +
+      '<path d="' + usageAreaPath(requestPoints, height - pad.bottom) + '" fill="#3b82f6" fill-opacity="0.08" stroke="none"></path>' +
+      '<path d="' + monotoneUsagePath(tokenPoints) + '" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>' +
+      '<path d="' + monotoneUsagePath(requestPoints) + '" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>' +
+      labels + hits + '</svg><div class="usage-tooltip" id="usage-tooltip"></div></div>' +
+      '<div class="usage-trend-data" hidden>' + JSON.stringify(points) + '</div></div>';
   }
 
   /* ── Tab 6: Mihomo 代理 ── */
@@ -1653,7 +1784,7 @@
     displayFont: "standard", displayDensity: "visual", cardNumbers: true,
     cardOrder: [], selectedCard: null, logsExpanded: false,
     channelModels: {}, channelsExpanded: false, workbuddyExpanded: false,
-    modelsExpanded: false, proxyGroupsExpanded: false
+    usageWindow: "1d", proxyGroupsExpanded: false
   };
 
   function render() {
@@ -1868,10 +1999,7 @@
       put("airport", "/airport-traffic");
     } else if (m[0] === "gateway") {
       put("gwOverview", "/newapi/overview");
-      if (m[1] === "models") {
-        put("gwPerformance", "/newapi/performance");
-        put("gwModelsMeta", "/newapi/models");
-      }
+      if (m[1] === "models") put("gwUsage", "/newapi/model-usage");
       put("gwBalance", "/newapi/balance");
       put("gwProbe", "/newapi/probe");
       put("gwAffinity", "/newapi/affinity");
@@ -2025,12 +2153,42 @@
         render();
       });
     });
-    body.querySelectorAll("[data-models-expand]").forEach(function (el) {
+    body.querySelectorAll("[data-usage-window]").forEach(function (el) {
       el.addEventListener("click", function () {
-        ui.modelsExpanded = el.getAttribute("data-models-expand") === "1";
+        ui.usageWindow = el.getAttribute("data-usage-window");
         render();
       });
     });
+    body.querySelectorAll("[data-usage-retry]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        el.disabled = true;
+        api("/newapi/model-usage")
+          .then(function (d) { cache.gwUsage = d; cacheAt.gwUsage = Date.now(); render(); })
+          .catch(function (e) { toast("用量加载失败：" + e.message); el.disabled = false; });
+      });
+    });
+    var usageTrend = body.querySelector(".usage-trend");
+    if (usageTrend) {
+      var usageData = JSON.parse((body.querySelector(".usage-trend-data") || {}).textContent || "[]");
+      var usageTooltip = body.querySelector("#usage-tooltip");
+      body.querySelectorAll("[data-usage-index]").forEach(function (hit) {
+        function showUsageTip(event) {
+          var index = parseInt(hit.getAttribute("data-usage-index"), 10);
+          var point = usageData[index];
+          if (!point || !usageTooltip) return;
+          usageTooltip.innerHTML = '<strong>' + esc(point.label) + '</strong>' +
+            '<div><i style="background:#3b82f6"></i>请求数 ' + compactNumber(point.requests) + '</div>' +
+            '<div><i style="background:#10b981"></i>Token ' + compactNumber(point.tokens) + '</div>';
+          var box = usageTrend.parentElement.getBoundingClientRect();
+          usageTooltip.style.left = Math.max(0, Math.min(box.width - 132, event.clientX - box.left + 10)) + "px";
+          usageTooltip.style.top = "6px";
+          usageTooltip.classList.add("show");
+        }
+        hit.addEventListener("mousemove", showUsageTip);
+        hit.addEventListener("mouseenter", showUsageTip);
+        hit.addEventListener("mouseleave", function () { usageTooltip.classList.remove("show"); });
+      });
+    }
     body.querySelectorAll("[data-proxy-expand]").forEach(function (el) {
       el.addEventListener("click", function () {
         ui.proxyGroupsExpanded = el.getAttribute("data-proxy-expand") === "1";
@@ -2240,19 +2398,6 @@
         b.disabled = true;
         apiPost("/newapi/channels/" + id + "/status", { status: status })
           .then(function () { toast("渠道已" + (status === 1 ? "启用" : "停用")); return refreshNow(); })
-          .catch(function (e) { toast("失败：" + e.message); })
-          .finally(function () { b.disabled = false; });
-      });
-    });
-
-    // 网关：模型开关（常用模型）
-    body.querySelectorAll(".model-toggle").forEach(function (b) {
-      b.addEventListener("click", function () {
-        var id = parseInt(b.getAttribute("data-id"), 10);
-        var status = parseInt(b.getAttribute("data-status"), 10);
-        b.disabled = true;
-        apiPost("/newapi/models/" + id + "/status", { status: status })
-          .then(function () { toast("模型已" + (status === 1 ? "启用" : "禁用")); return refreshNow(); })
           .catch(function (e) { toast("失败：" + e.message); })
           .finally(function () { b.disabled = false; });
       });

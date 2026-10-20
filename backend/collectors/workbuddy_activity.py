@@ -6,7 +6,7 @@
 `/status` 里透出「请求 → 账号」的映射（`/status` 只有 in_flight 这类聚合计数）。
 唯一的信息源是上游的请求流水日志（`internal/server/logging.go` 的 `logChatRow`）：
 
-    | #453 | 13:04:52 | global:deepseek-v4.1-flash | stream | 200 | user@example.com(deadbeef) | TTFB=3164ms | tok=208 | 47.0tok/s | total=4.9s |
+    | #453 | 13:04:52 | global:deepseek-v4.1-flash | stream | 200 | user@example.com(5a7a3440) | TTFB=3164ms | tok=208 | 47.0tok/s | total=4.9s |
 
 该行在请求**结束时**写出，所以这里给出的是「刚刚用过谁」，配合 `in_flight`
 （正在处理中）即可回答「现在在用哪个账号」。

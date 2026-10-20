@@ -63,7 +63,7 @@ class PanelCreditsTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(patch.stopall)
         patch.object(status, "WORKBUDDY_WAN3_PANEL", "http://panel:7864").start()
-        patch.object(status, "WORKBUDDY_WAN3_PANEL_TOKEN", "panel-test-token").start()
+        patch.object(status, "WORKBUDDY_WAN3_PANEL_TOKEN", "wbt_test").start()
         patch.object(status, "_PANEL_CREDIT_CACHE", {"ts": 0.0, "value": None}).start()
 
     def test_panel_credits_parsed_and_zero_dropped(self):

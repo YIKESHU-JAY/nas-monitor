@@ -1,7 +1,7 @@
 """爱快 WAN 口测速 collector。
 
 通过 Docker API 在 macvlan 网络 `qb_macvlan` 上启动一次性 Ookla CLI 容器，
-绑定源 IP（wan1=<source-ip-1> / wan2=<source-ip-2>），由爱快按源地址分流到
+绑定源 IP（wan1=192.168.2.201 / wan2=192.168.2.202），由爱快按源地址分流到
 对应 WAN 出口。Ookla 返回的 bandwidth 单位为 bytes/s，这里统一转换为 Mbps。
 """
 import json

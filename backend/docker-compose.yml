@@ -1,0 +1,78 @@
+services:
+  nas-monitor-api:
+    image: python:3.11-slim
+    container_name: nas-monitor-api
+    restart: always
+    ports:
+      # BIND_ADDR 留空则监听所有网卡；生产建议绑定内网地址，例如 192.168.1.100
+      - "${BIND_ADDR:-0.0.0.0}:8765:8765"
+    volumes:
+      - ./:/app:rw
+      - python-packages:/usr/local/lib/python3.11/site-packages
+      # 容器管理需要写权限（测速会创建一次性容器）
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      # ── 以下均为可选插件挂载 ──
+      # 设计约束：外部依赖（其他容器/其它卷）掉线或单个文件丢失，不能让整个后端起不来。
+      # 因此一律挂载**目录**、不挂单个文件：目录不存在时 Docker 会自动创建空目录，
+      # 容器照常启动；具体文件缺失只让对应采集器降级（卡片为空/隐藏），不影响其它功能。
+      # 宿主侧变量填「目录」路径，容器内约定文件名见下方注释。
+      # Mihomo 机场订阅快照目录（/api/airport-traffic）
+      - "${MIHOMO_DATA_DIR:-./.docker-mounts/empty}:/mihomo:ro"
+      # Mihomo v2 机场订阅快照与控制面配置（只读）
+      - "${MIHOMO_V2_DATA_DIR:-./.docker-mounts/empty}:/mihomo-v2:ro"
+      # MetaCubeXD 旧 WebView 兼容产物（build.mjs 生成，ES2015 转译 + polyfill）
+      - "${MIHOMO_PANEL_COMPAT_DIR:-./.docker-mounts/empty}:/app/panel_compat:ro"
+      # New API 日志数据库（只读；目录缺失时用量页返回最后成功快照并标记 stale）
+      - "${NEW_API_DATA_DIR:-../new-api-data}:/new-api-data:ro"
+      # Pipio 令牌目录（容器内文件名 pipio-admin-token.txt / pipio2-admin-token.txt）
+      - "${PIPIO_ADMIN_TOKEN_DIR:-./.docker-mounts/empty/pipio}:/run/secrets/pipio:ro"
+      - "${PIPIO2_ADMIN_TOKEN_DIR:-./.docker-mounts/empty/pipio2}:/run/secrets/pipio2:ro"
+      # WorkBuddy 配置目录（容器内文件名 config.json）
+      - "${WORKBUDDY_CONFIG_DIR:-./.docker-mounts/empty/workbuddy}:/run/secrets/workbuddy:ro"
+      - "${WORKBUDDY_WAN1_CONFIG_DIR:-./.docker-mounts/empty/workbuddy}:/run/secrets/workbuddy-wan1:ro"
+      - "${WORKBUDDY_WAN3_CONFIG_DIR:-./.docker-mounts/empty/workbuddy}:/run/secrets/workbuddy-wan3:ro"
+      # WorkBuddy auths 目录
+      - "${WORKBUDDY_AUTH_DIR:-./.docker-mounts/empty/auths}:/app/secrets/workbuddy-auths:ro"
+      - "${WORKBUDDY_WAN1_AUTH_DIR:-./.docker-mounts/empty/auths}:/app/secrets/workbuddy-wan1-auths:ro"
+      # wan3 不再挂 NFS：其账号目录在 remote-nas 上，导出抖动时挂载失败会拖住
+      # docker 启动。账号清单取上游 /status，实时积分由面板 HTTP 代查。
+      # 上游 state 目录（容器内文件名 state.json）
+      - "${WORKBUDDY_STATE_DIR:-./.docker-mounts/empty/workbuddy-state}:/app/secrets/workbuddy-state:ro"
+      # Hermes cron 注册表目录（容器内文件名 jobs.json）
+      - "${HERMES_CRON_DIR:-./.docker-mounts/empty/hermes}:/app/secrets/hermes:ro"
+    env_file:
+      - .env
+    environment:
+      API_PORT: "8765"
+      PYTHONUNBUFFERED: "1"
+      TZ: "${TZ:-Asia/Shanghai}"
+      # 容器内必须用挂载点路径；.env 里的同名变量是宿主机挂载源。
+      MIHOMO_PANEL_COMPAT_DIR: "/app/panel_compat"
+      NEWAPI_DB_PATH: "/new-api-data/new-api.db"
+      # 覆盖 env_file 里的宿主机路径：容器内运行时必须用挂载点路径，
+      # 否则 auths 目录读不到，积分聚合整体失效（含国际版 billing 兜底）。
+      WORKBUDDY_AUTH_DIR: "/app/secrets/workbuddy-auths"
+      WORKBUDDY_WAN1_AUTH_DIR: "/app/secrets/workbuddy-wan1-auths"
+      WORKBUDDY_STATE_FILE: "/app/secrets/workbuddy-state/state.json"
+      # 配置/令牌/cron 一律从「目录 + 固定文件名」读取，挂载源异常时文件缺失即降级。
+      WORKBUDDY_CONFIG: "/run/secrets/workbuddy/config.json"
+      WORKBUDDY_WAN1_CONFIG: "/run/secrets/workbuddy-wan1/config.json"
+      WORKBUDDY_WAN3_CONFIG: "/run/secrets/workbuddy-wan3/config.json"
+      PIPIO_SECRET_DIR: "/run/secrets/pipio"
+      PIPIO2_SECRET_DIR: "/run/secrets/pipio2"
+      HERMES_JOBS_FILE: "/app/secrets/hermes/jobs.json"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    working_dir: /app
+    command: python3 /app/api_server.py
+    stop_grace_period: 15s
+    # 仅 liveness 观测：unhealthy 不会触发 restart: always，自动恢复需外部 autoheal。
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8766/health',timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  python-packages:

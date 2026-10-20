@@ -2,6 +2,28 @@
 
 本项目按交付版本记录面向使用者的主要变化。历史版本可能没有逐条归档，以下从当前公开源码版本开始维护。
 
+## v238 · 2026-10-20
+
+### 网关用量页
+
+- 原“模型”Tab 替换为“用量”，保留 `#/gateway/models` 路由兼容；Web 与 Android 同步提供 1 天、7 天、30 天窗口。
+- 统计每个窗口内有调用的模型及其请求数和 Token（`prompt_tokens + completion_tokens`），按请求数展示模型分布和排行。
+- 后端通过只读 SQLite 参数化聚合获取统计，不逐页拉取管理 API，也不修改 New API 数据。
+- 新增 300 秒后端快照、single-flight 后台刷新和 stale-while-revalidate；最近成功结果持久化到数据目录，数据库故障时返回 `source=stale_snapshot` 和 `stale=true`，页面保留旧数据。
+- Web 与 Android 的 120 秒缓存作为第二层，不替代后端持久化快照。
+
+### 图表与展示
+
+- 模型分布采用 sub2api 风格的 192px 环形图和排行表，只借鉴信息结构，不复制业务代码，不新增图表依赖。
+- 请求数与 Token 趋势采用 Fritsch-Carlson 单调三次插值，双序列各叠加 8% 面积填充，首尾数据点贴边；Web 与 Android 共用左右边界、日期轴和索引联动语义。
+- 用量页完全移除费用、金额、quota 和美元展示；接口保留兼容 quota 字段，但页面不读取、不渲染。
+- README 中英文新增用量页展示，共新增 4 张用户确认的 Android 与 Web 截图。截图保持原始画面和尺寸，仅清除 EXIF/IPTC/XMP 等图片元数据，没有重绘或遮挡；图中的模型名、请求数和 Token 属于本轮明确接受的展示内容，不形成永久公开豁免。
+
+### 版本与验证
+
+- Android 版本升至 `238 / 238.0`。
+- 发布候选将重新运行 `test_gateway_usage`、后端全量 `unittest discover`、Web `node --check`，以及 Android 候选容器内 `testDebugUnitTest` 和 `assembleRelease`；实际结果以本轮发布记录为准。
+
 ## v236 · 2026-10-19
 
 本次发布将公开源码从 v214 更新到 v236，并重新完成隐私审查与发布构建验证。

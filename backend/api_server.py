@@ -2460,6 +2460,12 @@ class APIHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._gateway_error(e)
 
+        elif path == '/api/newapi/model-usage':
+            try:
+                return self._json(gateway_api.model_usage())
+            except Exception as e:
+                return self._gateway_error(e)
+
         elif path == '/api/newapi/probe':
             try:
                 return self._json(gateway_api.probe())
