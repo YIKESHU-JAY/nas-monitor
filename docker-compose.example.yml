@@ -25,8 +25,12 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       # Core-only deployment: disable the optional-service scheduler by default.
       NAS_MONITOR_SCHEDULER: ${NAS_MONITOR_SCHEDULER:-0}
+      NEWAPI_DB_PATH: /new-api-data/new-api.db
     volumes:
       - nas-monitor-data:/app/data
+      # Optional read-only New API database for the usage page. Set the host
+      # directory in .env; the container path matches NEWAPI_DB_PATH below.
+      - "${NEW_API_DATA_DIR:-./.docker-mounts/empty}:/new-api-data:ro"
     healthcheck:
       # Loopback liveness listener; does not require a token or call upstreams.
       test:

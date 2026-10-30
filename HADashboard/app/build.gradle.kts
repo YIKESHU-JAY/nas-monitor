@@ -20,8 +20,8 @@ android {
         applicationId = "io.github.nasmonitor.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 238
-        versionName = "238.0"
+        versionCode = 252
+        versionName = "252.0"
     }
 
     buildFeatures {

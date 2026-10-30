@@ -451,7 +451,7 @@ fun ContainersScreen(host: String, onBack: () -> Unit) {
                                     }
                                     if (c.ports.isNotEmpty()) {
                                         Spacer(Modifier.height(8.dp))
-                                        Surface(shape = RoundedCornerShape(8.dp), color = CardTint) {
+                                        Surface(shape = RoundedCornerShape(8.dp), color = InnerVariant) {
                                             Text("端口 ${c.ports}", fontSize = 11.sp, color = Muted, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
                                         }
                                     }

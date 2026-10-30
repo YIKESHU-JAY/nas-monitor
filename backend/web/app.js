@@ -689,12 +689,205 @@
 
   /* ── Tab 2: 性能 ── */
   function renderGwPerf() {
+    var data = cache.gwPerformance;
+    var out = "";
+    if (data === undefined && !ui.gwPerfLoaded) {
+      out += card('<div class="row between"><span class="card-title">近 24 小时性能</span>' +
+        '<span class="pill warn">加载中</span></div>' +
+        '<div class="gw-perf-skeleton mt-3"></div>' +
+        '<div class="tiny subtle mt-2">正在加载模型统计，首次进入性能页可能需要几秒。</div>' +
+        '<div class="mt-3"><button class="btn small" data-gw-perf-retry="1">' + icon("refresh", 13) + ' 重新加载</button></div>');
+    } else if (data === null || data === undefined) {
+      out += card('<div class="empty"><div class="big">性能统计暂不可用</div>' +
+        '<div class="caption">请求失败或暂未返回数据，请稍后重试。</div>' +
+        '<button class="btn small mt-2" data-gw-perf-retry="1">' + icon("refresh", 13) + ' 重试</button></div>');
+    } else {
+      out += renderGwPerfSummary(data);
+      var models = gwPerfModels(data);
+      if (!models.length) {
+        out += card('<div class="empty"><div class="big">暂无性能数据</div>' +
+          '<div class="caption">近 24 小时暂无模型请求；有新请求后再刷新。</div>' +
+          '<button class="btn small mt-2" data-gw-perf-retry="1">' + icon("refresh", 13) + ' 重新加载</button></div>');
+      } else {
+        out += renderGwPerfDistribution(models);
+        out += renderGwPerfSuccess(models);
+        var qualified = models.filter(function (m) {
+          return (Number(m.success) + Number(m.failed)) >= GW_PERF_LOW_SAMPLE;
+        });
+        if (qualified.length >= 2) out += renderGwPerfLatency(models, qualified, gwPerfSummary(models).weighted_use_time);
+      }
+    }
+    out += renderGwPerfSettings();
+    return out;
+  }
+
+  var GW_PERF_LOW_SAMPLE = 20;
+
+  function gwPerfModels(data) {
+    return ((data && data.models) || []).slice().sort(function (a, b) {
+      return (Number(b.requests) || 0) - (Number(a.requests) || 0);
+    });
+  }
+
+  function gwPerfSummary(models) {
+    var sum = {
+      requests: 0, success: 0, failed: 0, cancelled: 0, unknown: 0,
+      measured: 0, use_weighted: 0, frt_weighted: 0, frt_requests: 0, frt_models: 0
+    };
+    models.forEach(function (m) {
+      var requests = Number(m.requests) || 0;
+      var success = Number(m.success) || 0;
+      var failed = Number(m.failed) || 0;
+      sum.requests += requests;
+      sum.success += success;
+      sum.failed += failed;
+      sum.cancelled += Number(m.client_cancelled) || 0;
+      sum.unknown += Number(m.unknown) || 0;
+      sum.use_weighted += (Number(m.avg_use_time) || 0) * requests;
+      if (m.avg_frt !== null && m.avg_frt !== undefined && requests > 0) {
+        sum.frt_weighted += Number(m.avg_frt) * requests;
+        sum.frt_requests += requests;
+        sum.frt_models += 1;
+      }
+    });
+    sum.measured = sum.success + sum.failed;
+    sum.success_rate = sum.measured > 0 ? sum.success * 100 / sum.measured : null;
+    sum.weighted_use_time = sum.requests > 0 ? sum.use_weighted / sum.requests : null;
+    sum.weighted_frt = sum.frt_requests > 0 ? sum.frt_weighted / sum.frt_requests : null;
+    return sum;
+  }
+
+  function gwPerfRate(success, failed) {
+    var measured = (Number(success) || 0) + (Number(failed) || 0);
+    return measured > 0 ? (Number(success) || 0) * 100 / measured : null;
+  }
+
+  function gwPerfRateText(rate) {
+    return rate === null ? "--" : (Math.round(rate * 10) / 10) + "%";
+  }
+
+  function gwPerfRateTone(rate) {
+    if (rate === null) return "var(--subtle)";
+    return rate >= 90 ? "var(--green)" : rate >= 70 ? "var(--amber)" : "var(--red)";
+  }
+
+  function gwPerfDuration(ms) {
+    if (ms === null || ms === undefined || !isFinite(ms) || ms <= 0) return "--";
+    if (ms >= 1000) return (ms / 1000).toFixed(2) + "s";
+    return Math.round(ms) + "ms";
+  }
+
+  function gwPerfCount(value) {
+    value = Number(value) || 0;
+    return value.toLocaleString("zh-CN");
+  }
+
+  function renderGwPerfSummary(data) {
+    var models = gwPerfModels(data);
+    var sum = gwPerfSummary(models);
+    var generated = data.generated_at ? ago(data.generated_at) : "刚刚";
+    return '<div class="usage-summary gw-perf-summary">' +
+      '<div class="usage-summary-head"><div><div class="usage-title">近 24 小时性能</div>' +
+      '<div class="usage-subtitle">更新于 ' + esc(generated) + '</div></div>' +
+      '<span class="pill on">24h</span></div>' +
+      '<div class="usage-summary-metrics">' +
+      '<div><strong>' + gwPerfCount(sum.requests) + '</strong><span>总请求</span></div>' +
+      '<div><strong style="color:' + gwPerfRateTone(sum.success_rate) + '">' +
+      gwPerfRateText(sum.success_rate) + '</strong><span>整体成功率</span></div>' +
+      '<div><strong>' + gwPerfDuration(sum.weighted_use_time) + '</strong><span>加权平均耗时</span></div>' +
+      '</div>' +
+      '<div class="gw-perf-counts">' +
+      '<span class="gw-perf-count"><i style="background:var(--green)"></i>成功 ' + gwPerfCount(sum.success) + '</span>' +
+      '<span class="gw-perf-count"><i style="background:var(--red)"></i>失败 ' + gwPerfCount(sum.failed) + '</span>' +
+      '<span class="gw-perf-count"><i style="background:var(--amber)"></i>取消 ' + gwPerfCount(sum.cancelled) + '</span>' +
+      (sum.unknown > 0 ? '<span class="gw-perf-count"><i style="background:var(--subtle)"></i>未知 ' + gwPerfCount(sum.unknown) + '</span>' : '') +
+      '</div>' +
+      '</div>';
+  }
+
+  function renderGwPerfDistribution(models) {
+    var total = models.reduce(function (sum, m) { return sum + (Number(m.requests) || 0); }, 0) || 1;
+    return '<div class="usage-distribution-card gw-perf-card">' +
+      '<div class="usage-card-head"><div><div class="usage-card-title">模型请求占比</div>' +
+      '</div>' +
+      '<span class="tiny subtle">' + models.length + ' 个模型</span></div>' +
+      '<div class="usage-distribution gw-perf-distribution">' +
+      renderUsageDonut(models.map(function (m) {
+        return { model: m.model, requests: m.requests };
+      })) +
+      '<div class="usage-model-table-wrap gw-perf-table-wrap"><table class="usage-model-table gw-perf-table"><thead><tr>' +
+      '<th>模型</th><th class="num">请求</th><th class="num">成功</th><th class="num">失败</th><th class="num">取消</th><th class="num">样本</th>' +
+      '</tr></thead><tbody>' + models.map(function (m, index) {
+        var rate = gwPerfRate(m.success, m.failed);
+        var measured = (Number(m.success) || 0) + (Number(m.failed) || 0);
+        var share = (Number(m.requests) || 0) * 100 / total;
+        return '<tr><td><span class="usage-model-dot" style="background:' + usagePalette[index % usagePalette.length] + '"></span>' +
+          '<span class="usage-model-name">' + esc(m.model) + '</span>' +
+          '<span class="gw-perf-share">' + (Math.round(share * 10) / 10) + '%</span></td>' +
+          '<td class="num">' + gwPerfCount(m.requests) + '</td>' +
+          '<td class="num" style="color:' + gwPerfRateTone(rate) + '">' + gwPerfRateText(rate) + '</td>' +
+          '<td class="num" style="color:' + (Number(m.failed) > 0 ? "var(--red)" : "var(--muted)") + '">' + gwPerfCount(m.failed) + '</td>' +
+          '<td class="num" style="color:' + (Number(m.client_cancelled) > 0 ? "var(--amber)" : "var(--muted)") + '">' + gwPerfCount(m.client_cancelled) + '</td>' +
+          '<td class="num">' + (measured < GW_PERF_LOW_SAMPLE ? '<span class="gw-perf-low">低 ' + measured + '</span>' : measured) + '</td></tr>';
+      }).join("") + '</tbody></table></div></div></div>';
+  }
+
+  function renderGwPerfSuccess(models) {
+    var measuredRows = models.filter(function (m) {
+      return (Number(m.success) || 0) + (Number(m.failed) || 0) > 0;
+    }).sort(function (a, b) {
+      var ar = gwPerfRate(a.success, a.failed), br = gwPerfRate(b.success, b.failed);
+      if (br !== ar) return br - ar;
+      return (Number(b.requests) || 0) - (Number(a.requests) || 0);
+    }).slice(0, 6);
+    var head = '<div class="usage-card-head"><div><div class="usage-card-title">Top 模型成功率</div>' +
+      '</div></div>';
+    if (!measuredRows.length) {
+      return '<div class="usage-distribution-card gw-perf-card">' + head +
+        '<div class="empty caption">暂无可计算成功率的模型请求。</div></div>';
+    }
+    return '<div class="usage-distribution-card gw-perf-card">' + head +
+      '<div class="gw-perf-bars">' + measuredRows.map(function (m) {
+        var measured = (Number(m.success) || 0) + (Number(m.failed) || 0);
+        var rate = gwPerfRate(m.success, m.failed);
+        var tone = gwPerfRateTone(rate);
+        return '<div class="gw-perf-bar-row">' +
+          '<div class="gw-perf-bar-head"><span class="gw-perf-bar-name">' + esc(m.model) + '</span>' +
+          '<span class="gw-perf-bar-value" style="color:' + tone + '">' + gwPerfRateText(rate) + '</span>' +
+          '<span class="gw-perf-bar-sample">' + measured + ' 次有效' + '</span></div>' +
+          '<div class="gw-perf-bar-track"><i style="width:' + Math.max(0, Math.min(100, rate)) + '%;background:' + tone + '"></i></div>' +
+          '<div class="gw-perf-bar-foot">成功 ' + gwPerfCount(m.success) + ' · 失败 ' + gwPerfCount(m.failed) +
+          ' · 取消 ' + gwPerfCount(m.client_cancelled) + ' · 总请求 ' + gwPerfCount(m.requests) + '</div>' +
+          '</div>';
+      }).join("") + '</div></div>';
+  }
+
+  function renderGwPerfLatency(models, qualified, weighted) {
+    var shown = qualified.slice(0, 6);
+    var maxMs = shown.reduce(function (max, m) { return Math.max(max, Number(m.avg_use_time) || 0); }, 1);
+    return '<div class="usage-distribution-card gw-perf-card">' +
+      '<div class="usage-card-head"><div><div class="usage-card-title">平均耗时对比</div>' +
+      '</div>' +
+      '<span class="tiny" style="color:var(--accent);font-weight:600">加权 ' + gwPerfDuration(weighted) + '</span></div>' +
+      '<div class="gw-perf-bars gw-perf-latency">' + shown.map(function (m) {
+        var ms = Number(m.avg_use_time) || 0;
+        return '<div class="gw-perf-bar-row">' +
+          '<div class="gw-perf-bar-head"><span class="gw-perf-bar-name">' + esc(m.model) + '</span>' +
+          '<span class="gw-perf-bar-value">' + gwPerfDuration(ms) + '</span>' +
+          '<span class="gw-perf-bar-sample">' + gwPerfCount(m.requests) + ' 次请求</span></div>' +
+          '<div class="gw-perf-bar-track"><i style="width:' + Math.max(2, Math.min(100, ms * 100 / maxMs)) + '%;background:var(--accent)"></i></div>' +
+          '</div>';
+      }).join("") + '</div>' +
+      '</div>';
+  }
+
+  function renderGwPerfSettings() {
     var policy = cache.gwPolicy, aff = cache.gwAffinity;
+    var policyChs = (cache.gwOverview && cache.gwOverview.channels || []);
+    var selCh = policy && policy.channel_id ? policy.channel_id : ((policyChs[0] || {}).id) || "";
     var out = "";
     if (policy) {
-      var policyChs = (cache.gwOverview && cache.gwOverview.channels || []);
-      var selCh = policy.channel_id || ((policyChs[0] || {}).id) || "";
-      out += card('<div class="row between"><span class="card-title">路由策略</span>' +
+      out += '<div class="gw-perf-setting-block"><div class="row between"><span class="card-title">路由策略</span>' +
         '<span class="pill ' + (policy.active ? "on" : "neutral") + '">' + (policy.active ? "已生效" : "未启用") + '</span></div>' +
         '<div class="kv mt-3">' +
         '<div class="kv-item"><span>当前模式</span><span>' + esc(policyModeLabel(policy.mode)) + '</span></div>' +
@@ -712,24 +905,28 @@
         '<button class="btn small" data-policy="preferred">设为最优先</button>' +
         '<button class="btn small" data-policy="exclusive">仅使用该渠道</button>' +
         '<button class="btn small danger" data-policy-restore="1">恢复正常路由</button>' +
-        '</div>');
+        '</div></div>';
     }
     if (aff) {
-      out += card('<div class="row between"><span class="card-title">亲和调度</span>' +
+      out += '<div class="gw-perf-setting-block"><div class="row between"><span class="card-title">亲和调度</span>' +
         '<span class="pill ' + (aff.enabled ? "on" : "neutral") + '">' + (aff.enabled ? "已开启" : "已关闭") + '</span></div>' +
         '<div class="kv mt-3">' +
         '<div class="kv-item"><span>缓存条目</span><span>' + n((aff.cache || {}).total, 0) + '</span></div>' +
         '<div class="kv-item"><span>容量</span><span>' + n((aff.cache || {}).cache_capacity, 0) + '</span></div>' +
         '<div class="kv-item"><span>算法</span><span>' + esc((aff.cache || {}).cache_algo || "-") + '</span></div>' +
         '</div>' +
-        '<div class="row gap-2 mt-3">' +
-        '<button class="btn small" data-affinity="' + (aff.enabled ? "0" : "1") + '">' +
+        '<div class="row gap-2 mt-3"><button class="btn small" data-affinity="' + (aff.enabled ? "0" : "1") + '">' +
         (aff.enabled ? "关闭亲和" : "开启亲和") + '</button>' +
         '<button class="btn small" data-affinity-clear="1">清空缓存</button>' +
-        '</div>');
+        '</div></div>';
     }
-    if (!out) return '<div class="empty caption">暂无性能数据</div>';
-    return out;
+    var summary = policy
+      ? (policy.active ? "路由 " + esc(policy.channel_name || "-") + " · " + esc(policyModeLabel(policy.mode))
+        : (aff && aff.enabled ? "正常路由 · 亲和调度已开启" : "正常路由 · 亲和调度已关闭"))
+      : (aff ? (aff.enabled ? "亲和调度已开启" : "亲和调度已关闭") : "正在读取路由与亲和设置…");
+    return uiSection("调度设置", '<span class="tiny subtle">' + summary + '</span>', "gwPerfSettings", function () {
+      return out || '<div class="empty caption">暂无调度设置数据。</div>';
+    }, false);
   }
 
   /* ── Tab 3: 日志 ── */
@@ -887,7 +1084,7 @@
     return value.toLocaleString("zh-CN");
   }
 
-  function renderUsageDonut(models) {
+  function renderUsageDonut(models, centerLabel) {
     var total = models.reduce(function (sum, item) { return sum + (Number(item.requests) || 0); }, 0) || 1;
     var radius = 52, circumference = 2 * Math.PI * radius, offset = 0;
     var arcs = models.map(function (item, index) {
@@ -902,7 +1099,8 @@
     }).join("");
     return '<div class="usage-donut"><svg viewBox="0 0 128 128" role="img" aria-label="模型请求占比">' +
       '<circle cx="64" cy="64" r="' + radius + '" fill="none" stroke="var(--track)" stroke-width="16"></circle>' +
-      arcs + '</svg><div class="usage-donut-center"><strong>' + compactNumber(total) + '</strong><span>请求</span></div></div>';
+      arcs + '</svg><div class="usage-donut-center"><strong>' + compactNumber(total) + '</strong>' +
+      '<span>' + esc(centerLabel || "请求") + '</span></div></div>';
   }
 
   function monotoneUsagePath(points) {
@@ -1999,6 +2197,7 @@
       put("airport", "/airport-traffic");
     } else if (m[0] === "gateway") {
       put("gwOverview", "/newapi/overview");
+      if (m[1] === "performance" || !m[1]) put("gwPerformance", "/newapi/performance");
       if (m[1] === "models") put("gwUsage", "/newapi/model-usage");
       put("gwBalance", "/newapi/balance");
       put("gwProbe", "/newapi/probe");
@@ -2165,6 +2364,25 @@
         api("/newapi/model-usage")
           .then(function (d) { cache.gwUsage = d; cacheAt.gwUsage = Date.now(); render(); })
           .catch(function (e) { toast("用量加载失败：" + e.message); el.disabled = false; });
+      });
+    });
+    body.querySelectorAll("[data-gw-perf-retry]").forEach(function (el) {
+      el.addEventListener("click", function () {
+        el.disabled = true;
+        el.textContent = "加载中…";
+        api("/newapi/performance")
+          .then(function (d) {
+            cache.gwPerformance = d;
+            cacheAt.gwPerformance = Date.now();
+            ui.gwPerfLoaded = true;
+            render();
+          })
+          .catch(function (e) {
+            cache.gwPerformance = null;
+            ui.gwPerfLoaded = true;
+            toast("性能统计加载失败：" + e.message);
+            render();
+          });
       });
     });
     var usageTrend = body.querySelector(".usage-trend");

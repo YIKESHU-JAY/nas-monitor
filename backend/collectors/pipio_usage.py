@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from .shadow_store import atomic_write_snapshot
+from .shadow_store import atomic_write_snapshot, snapshot_target
 
 API = "https://pipio.io"
 # 每个账号一个目录（compose 挂目录而非单文件，外部 token 丢失也不会阻塞容器启动）。
@@ -161,6 +161,28 @@ def _usd(q) -> float:
     return q / Q
 
 
+def _load_previous_accounts() -> dict:
+    """Read the last snapshot and index valid account payloads by name."""
+    target = snapshot_target(
+        "pipio_usage_snapshot.json",
+        production_relative="pipio_usage_snapshot.json",
+        switch="NAS_MONITOR_CUTOVER_USAGE",
+    )
+    try:
+        with target.open(encoding="utf-8") as stream:
+            value = json.load(stream)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    accounts = value.get("accounts") if isinstance(value, dict) else None
+    if not isinstance(accounts, list):
+        return {}
+    return {
+        item.get("name"): item
+        for item in accounts
+        if isinstance(item, dict) and item.get("name") and item.get("ok")
+    }
+
+
 def collect() -> dict:
     items = []
     any_ok = False
@@ -186,9 +208,22 @@ def collect() -> dict:
     if not any_ok:
         raise RuntimeError("Pipio 用量明细全部渠道失败，保留上一份有效快照")
 
+    previous_accounts = _load_previous_accounts()
     accounts = []
     for it in items:
         d = it["d"]
+        if not d.get("ok"):
+            previous = previous_accounts.get(d.get("name"))
+            if previous is not None:
+                # A single transient upstream failure must not replace a valid
+                # account with an error card. Keep the last readable values and
+                # expose the failure as stale metadata for diagnostics.
+                account = dict(previous)
+                account["stale"] = True
+                account["last_attempt_error"] = str(d.get("err") or "采集失败")[:120]
+                account["error"] = None
+                accounts.append(account)
+                continue
         accounts.append({
             "name": d.get("name"), "display": d.get("display"),
             "ok": bool(d.get("ok")), "error": d.get("err"),

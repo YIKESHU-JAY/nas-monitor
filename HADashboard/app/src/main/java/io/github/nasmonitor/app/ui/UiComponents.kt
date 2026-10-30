@@ -61,13 +61,13 @@ fun FrostCard(
         ) { content() }
         return
     }
-    // 非玻璃主题保持原样
+    // 非玻璃普通卡保持 8%-12% 透出；elevation 会在半透明表面上叠出白矩形。
     Card(
         modifier = (if (onClick != null) modifier.clickable(onClick = onClick) else modifier)
             .clip(RoundedCornerShape(18.dp)),
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = CardWhite),
-        elevation = MonitorCardElevation(1.dp),
+        colors = CardDefaults.cardColors(containerColor = CardSurface),
+        elevation = CardDefaults.cardElevation(defaultElevation = NON_GLASS_CARD_ELEVATION),
         border = CardDefaults.outlinedCardBorder().copy(
             brush = Brush.linearGradient(listOf(Track, Color.Transparent, Track))
         )
@@ -301,7 +301,7 @@ fun ContentSizedTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Uni
                     modifier = Modifier.clip(RoundedCornerShape(12.dp))
                         .background(if (active) BlueSoft else Color.Transparent)
                         .padding(horizontal = 14.dp, vertical = 8.dp),
-                    color = if (active) Blue else Muted,
+                    color = if (active) OnAccentSoft else Muted,
                     fontSize = 13.sp,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal
                 )

@@ -3,7 +3,8 @@ package io.github.nasmonitor.app.ui
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -35,10 +36,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -47,7 +52,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.navigation.NavHostController
@@ -61,15 +69,57 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlin.math.pow
 
-private data class GatewayNavItem(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
-private val gatewayNavItems = listOf(
-    GatewayNavItem("概览", Icons.Default.Info),
-    GatewayNavItem("性能", Icons.Default.Storage),
-    GatewayNavItem("日志", Icons.Default.List),
-    GatewayNavItem("渠道", Icons.Default.SettingsEthernet),
-    GatewayNavItem("用量", Icons.Default.BarChart)
+private const val GATEWAY_TAB_PREFS = "gateway_tab_prefs"
+private const val GATEWAY_TAB_ORDER_KEY = "tab_order"
+
+private data class GatewayNavItem(
+    val id: String,
+    val label: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector
 )
+private val gatewayNavItems = listOf(
+    GatewayNavItem("overview", "概览", Icons.Default.Info),
+    GatewayNavItem("performance", "性能", Icons.Default.Storage),
+    GatewayNavItem("logs", "日志", Icons.Default.List),
+    GatewayNavItem("channels", "渠道", Icons.Default.SettingsEthernet),
+    GatewayNavItem("usage", "用量", Icons.Default.BarChart)
+)
+
+internal fun gatewayDefaultOrder(): List<String> = gatewayNavItems.map { it.id }
+
+internal fun overviewDailyTokenLabel(usage: NewApiModelUsage?): String {
+    val tokens = usage?.windows?.get("1d")?.models?.sumOf { it.tokens } ?: return "--"
+    return formatUsageCompact(tokens)
+}
+
+internal fun normalizeGatewayOrder(saved: List<String>?): List<String> {
+    val defaults = gatewayDefaultOrder()
+    if (saved.isNullOrEmpty()) return defaults
+    val valid = saved.distinct().filter { it in defaults }
+    return valid + defaults.filter { it !in valid }
+}
+
+internal fun moveGatewayTab(order: List<String>, from: Int, to: Int): List<String> {
+    if (from !in order.indices || to !in order.indices || from == to) return order
+    return order.toMutableList().also { it.add(to, it.removeAt(from)) }
+}
+
+private class GatewayTabStore(context: android.content.Context) {
+    private val prefs = context.getSharedPreferences(GATEWAY_TAB_PREFS, android.content.Context.MODE_PRIVATE)
+
+    fun load(): List<String> {
+        val raw = prefs.getString(GATEWAY_TAB_ORDER_KEY, null)
+            ?: return gatewayDefaultOrder()
+        val saved = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        return normalizeGatewayOrder(saved)
+    }
+
+    fun save(order: List<String>) {
+        prefs.edit().putString(GATEWAY_TAB_ORDER_KEY, normalizeGatewayOrder(order).joinToString(",")).apply()
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, androidx.compose.material.ExperimentalMaterialApi::class)
 @Composable
@@ -83,12 +133,20 @@ fun GatewayScreen(nav: NavHostController) {
     var routingPolicy by remember { mutableStateOf<NewApiRoutingPolicy?>(null) }
     var clearAffinityPending by remember { mutableStateOf(false) }
     var logs by remember { mutableStateOf<NewApiLogPage?>(null) }
+    val context = LocalContext.current
     // 前后台感知：退到后台时暂停静默轮询，回到前台立刻恢复
     var lifecycleResumed by remember { mutableStateOf(true) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { lifecycleResumed = true }
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { lifecycleResumed = false }
-    val pagerState = rememberPagerState(initialPage = 0) { gatewayNavItems.size }
+    val tabStore = remember(context) { GatewayTabStore(context) }
+    var tabOrder by remember { mutableStateOf(tabStore.load()) }
+    val orderedNavItems = remember(tabOrder) {
+        tabOrder.mapNotNull { id -> gatewayNavItems.firstOrNull { it.id == id } }
+    }
+    val pagerState = rememberPagerState(initialPage = 0) { orderedNavItems.size }
     val selectedTab = pagerState.currentPage
+    val selectedTabId = orderedNavItems.getOrNull(selectedTab)?.id ?: "overview"
+    var tabDragActive by remember { mutableStateOf(false) }
     var logPage by remember { mutableStateOf(0) }
     var logTokens by remember { mutableStateOf<List<String>>(emptyList()) }
     var logTokenFilter by remember { mutableStateOf<String?>(null) }
@@ -143,7 +201,6 @@ fun GatewayScreen(nav: NavHostController) {
     var logRequestKey by remember { mutableStateOf<Pair<Int, String?>?>(null) }
     var logRequestId by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
 
     fun beginOperation(name: String): Boolean {
         if (opRunning != null) return false
@@ -253,6 +310,19 @@ fun GatewayScreen(nav: NavHostController) {
             pullRefreshing = false
         }
     }
+    fun updateAffinity(enabled: Boolean) = scope.launch {
+        val operation = "affinity"
+        if (!beginOperation(operation)) return@launch
+        try {
+            affinity = ApiClient.setNewApiAffinity(enabled)
+            error = null
+            saveGatewayCache()
+        } catch (t: Throwable) {
+            error = "亲和性开关更新失败：${t.message ?: t.javaClass.simpleName}"
+        } finally {
+            endOperation(operation)
+        }
+    }
     fun toggleWorkBuddyAccount(account: WorkBuddyAccount) = scope.launch {
         if (workbuddyTogglingUid != null) return@launch
         val expectedDisabled = !account.disabled
@@ -345,25 +415,35 @@ fun GatewayScreen(nav: NavHostController) {
         loadOverview()
     }
     LaunchedEffect(pagerState.settledPage) {
-        val page = pagerState.settledPage
+        val pageId = orderedNavItems.getOrNull(pagerState.settledPage)?.id ?: return@LaunchedEffect
         val logStale = System.currentTimeMillis() - lastLogLoadAt > 30_000
-        if (page == 2 && (logs == null || logStale)) loadLogs(logPage)
-        if (page == 2 && System.currentTimeMillis() - lastTokenLoadAt > 60_000) loadLogTokens()
-        if (page == 4 && (usage == null || System.currentTimeMillis() - lastUsageLoadAt > 120_000)) loadUsage()
-        // 性能页（1）直接消费模型统计；概览（0）的成功率也依赖同一份数据，
+        if (pageId == "logs" && (logs == null || logStale)) loadLogs(logPage)
+        if (pageId == "logs" && System.currentTimeMillis() - lastTokenLoadAt > 60_000) loadLogTokens()
+        if (pageId == "usage" && (usage == null || System.currentTimeMillis() - lastUsageLoadAt > 120_000)) loadUsage()
+        // 性能页直接消费模型统计；概览的成功率也依赖同一份数据，
         // 因此首次进入这两个页面时按需加载，而不是只在“模型”页加载。
-        if (page in listOf(0, 1) && performance == null) loadPerformance(silent = page == 0)
-        if (page == 1 && performance != null && System.currentTimeMillis() - lastPerformanceLoadAt > 120_000) loadPerformance(silent = true)
-        if (page != 2 && page != 4 && overview == null) loadOverview()
+        if (pageId in listOf("overview", "performance") && performance == null) {
+            loadPerformance(silent = pageId == "overview")
+        }
+        // 概览的成功率行同时展示用量页的最近一天 Token，复用同一份用量数据。
+        if (pageId == "overview" && (usage == null || System.currentTimeMillis() - lastUsageLoadAt > 120_000)) {
+            loadUsage(silent = true)
+        }
+        if (pageId == "performance" && performance != null &&
+            System.currentTimeMillis() - lastPerformanceLoadAt > 120_000
+        ) loadPerformance(silent = true)
+        if (pageId !in listOf("logs", "usage") && overview == null) loadOverview()
     }
     LaunchedEffect(pagerState.settledPage, lifecycleResumed) {
         // 概览页（余额卡 + 模型池探针）停留期间每 30 秒静默重拉后端快照；
         // 数据新鲜度的上限仍由 NAS 侧 cron 决定（余额 */10、探针 */10）
-        if (pagerState.settledPage !in listOf(0, 2) || !lifecycleResumed) return@LaunchedEffect
+        val pageId = orderedNavItems.getOrNull(pagerState.settledPage)?.id ?: return@LaunchedEffect
+        if (pageId !in listOf("overview", "logs") || !lifecycleResumed) return@LaunchedEffect
         while (isActive) {
             delay(30_000)
-            if (pagerState.settledPage == 0 && lifecycleResumed) loadOverview(silent = true)
-            if (pagerState.settledPage == 2 && lifecycleResumed) {
+            val currentId = orderedNavItems.getOrNull(pagerState.settledPage)?.id
+            if (currentId == "overview" && lifecycleResumed) loadOverview(silent = true)
+            if (currentId == "logs" && lifecycleResumed) {
                 loadLogs(logPage, silent = true)
                 if (System.currentTimeMillis() - lastTokenLoadAt > 60_000) loadLogTokens()
             }
@@ -373,11 +453,23 @@ fun GatewayScreen(nav: NavHostController) {
     Scaffold(
         containerColor = PageBackground,
         topBar = {
-            GatewayTopTabs(selected = selectedTab) { target ->
-                scope.launch {
-                    pagerState.animateScrollToPage(target)
-                }
-            }
+            GatewayTopTabs(
+                items = orderedNavItems,
+                selectedId = selectedTabId,
+                onSelect = { id ->
+                    val target = orderedNavItems.indexOfFirst { it.id == id }
+                    if (target >= 0) scope.launch { pagerState.animateScrollToPage(target) }
+                },
+                onMove = { from, to ->
+                    val next = moveGatewayTab(tabOrder, from, to)
+                    val currentId = orderedNavItems.getOrNull(selectedTab)?.id
+                    tabOrder = next
+                    tabStore.save(next)
+                    val target = next.indexOf(currentId)
+                    if (target >= 0) scope.launch { pagerState.scrollToPage(target) }
+                },
+                onDragActiveChange = { tabDragActive = it }
+            )
         }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
@@ -385,10 +477,10 @@ fun GatewayScreen(nav: NavHostController) {
                 refreshing = pullRefreshing,
                 onRefresh = {
                     pullRefreshing = true
-                    when (selectedTab) {
-                        2 -> { loadLogs(logPage); loadLogTokens() }
-                        1 -> loadPerformance()
-                        4 -> loadUsage()
+                    when (selectedTabId) {
+                        "logs" -> { loadLogs(logPage); loadLogTokens() }
+                        "performance" -> loadPerformance()
+                        "usage" -> loadUsage()
                         else -> loadOverview()
                     }
                 }
@@ -397,12 +489,14 @@ fun GatewayScreen(nav: NavHostController) {
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
-                key = { it }
+                key = { index -> orderedNavItems.getOrNull(index)?.id ?: index.toString() },
+                userScrollEnabled = !tabDragActive
             ) { page ->
-                when (page) {
-                    0 -> GatewayOverviewPage(
+                when (orderedNavItems.getOrNull(page)?.id) {
+                    "overview" -> GatewayOverviewPage(
                         data = overview,
                         performance = performance,
+                        usage = usage,
                         affinity = affinity,
                         probe = probe,
                         balance = balance,
@@ -428,19 +522,17 @@ fun GatewayScreen(nav: NavHostController) {
                             }
                         },
                         loading = loading || opRunning != null,
-                        onAffinityChange = { enabled ->
-                            scope.launch {
-                                val operation = "affinity"
-                                if (!beginOperation(operation)) return@launch
-                                try { affinity = ApiClient.setNewApiAffinity(enabled); error = null; saveGatewayCache() }
-                                catch (t: Throwable) { error = "亲和性开关更新失败：${t.message ?: t.javaClass.simpleName}" }
-                                finally { endOperation(operation) }
-                            }
-                        },
+                        onAffinityChange = { updateAffinity(it) },
                         onClearAffinity = { clearAffinityPending = true }
                     )
-                    1 -> GatewayPerformancePage(performance ?: emptyList(), performanceLoading, performanceError)
-                    2 -> GatewayLogPage(
+                    "performance" -> GatewayPerformancePage(
+                        rows = performance,
+                        loading = performanceLoading,
+                        error = performanceError,
+                        updatedAt = lastPerformanceLoadAt,
+                        onRetry = { loadPerformance() }
+                    )
+                    "logs" -> GatewayLogPage(
                         data = logs,
                         page = logPage,
                         tokens = logTokens,
@@ -457,7 +549,7 @@ fun GatewayScreen(nav: NavHostController) {
                         },
                         onPage = { loadLogs(it) }
                     )
-                    3 -> GatewayChannelPage(
+                    "channels" -> GatewayChannelPage(
                         rows = overview?.channels ?: emptyList(),
                         loading = loading || opRunning != null,
                         policy = routingPolicy,
@@ -504,9 +596,9 @@ fun GatewayScreen(nav: NavHostController) {
             if (loading) {
                 Text("正在加载…", color = Muted, modifier = Modifier.align(Alignment.TopCenter).padding(8.dp))
             }
-            (error ?: when (selectedTab) {
-                2 -> logsError
-                4 -> usageError
+            (error ?: when (selectedTabId) {
+                "logs" -> logsError
+                "usage" -> usageError
                 else -> overviewError
             })?.let { GatewayErrorBanner(it) }
         }
@@ -620,14 +712,64 @@ fun GatewayScreen(nav: NavHostController) {
 }
 
 @Composable
-private fun GatewayTopTabs(selected: Int, onSelect: (Int) -> Unit) {
+private fun GatewayTopTabs(
+    items: List<GatewayNavItem>,
+    selectedId: String,
+    onSelect: (String) -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onDragActiveChange: (Boolean) -> Unit = {}
+) {
+    var draggingIndex by remember { mutableStateOf(-1) }
+    var dragOffset by remember { mutableStateOf(0f) }
+    DisposableEffect(Unit) { onDispose { onDragActiveChange(false) } }
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        gatewayNavItems.forEachIndexed { index, item ->
-            val active = index == selected
+        items.forEachIndexed { index, item ->
+            val active = item.id == selectedId
+            val dragging = index == draggingIndex
             Box(
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                    .zIndex(if (dragging) 1f else 0f)
+                    .graphicsLayer {
+                        translationX = if (dragging) dragOffset else 0f
+                        alpha = if (dragging) 0.72f else 1f
+                        scaleX = if (dragging) 1.04f else 1f
+                        scaleY = if (dragging) 1.04f else 1f
+                    }
+                    .pointerInput(items, index) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = {
+                                draggingIndex = index
+                                dragOffset = 0f
+                                onDragActiveChange(true)
+                            },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                dragOffset += amount.x
+                            },
+                            onDragEnd = {
+                                if (draggingIndex >= 0) {
+                                    val tabWidth = size.width.toFloat() / items.size.coerceAtLeast(1)
+                                    val steps = (dragOffset / tabWidth.coerceAtLeast(1f)).roundToInt()
+                                    val swap = (draggingIndex + steps).coerceIn(0, items.lastIndex)
+                                    if (swap != draggingIndex) onMove(draggingIndex, swap)
+                                }
+                                draggingIndex = -1
+                                dragOffset = 0f
+                                onDragActiveChange(false)
+                            },
+                            onDragCancel = {
+                                draggingIndex = -1
+                                dragOffset = 0f
+                                onDragActiveChange(false)
+                            }
+                        )
+                    }
                     .clip(RoundedCornerShape(12.dp))
-                    .selectable(selected = active, role = Role.Tab, onClick = { onSelect(index) }),
+                    .then(
+                        if (dragging) Modifier.border(1.5.dp, Blue, RoundedCornerShape(12.dp))
+                        else Modifier
+                    )
+                    .clickable(role = Role.Tab, onClick = { onSelect(item.id) }),
                 contentAlignment = Alignment.Center
             ) {
                 Text(item.label, color = if (active) Blue else Muted, fontSize = 13.sp,
@@ -645,6 +787,7 @@ private fun GatewayTopTabs(selected: Int, onSelect: (Int) -> Unit) {
 private fun GatewayOverviewPage(
     data: NewApiGatewayOverview?,
     performance: List<NewApiModelPerformance>?,
+    usage: NewApiModelUsage?,
     affinity: NewApiAffinityState?,
     probe: NewApiProbeResponse?,
     balance: NewApiBalance?,
@@ -678,89 +821,53 @@ private fun GatewayOverviewPage(
                         Box(Modifier.width(1.dp).height(36.dp).background(Track))
                         GatewayMetricCell("RPM", data.rpm?.toString() ?: "--", Green, Modifier.weight(1f))
                     }
-                    // 整体成功率：依赖按需加载的模型统计，未加载时不占位
+                    // 成功率与今日 Token 并列；两者分别来自模型统计和用量页同一份数据。
                     if (performance != null) {
                         Spacer(Modifier.height(10.dp))
                         Divider(color = Track, thickness = 0.8.dp)
                         Spacer(Modifier.height(8.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("整体成功率", color = Muted, fontSize = 11.sp)
-                            Text("${(rate * 100).toInt()}%", color = successColor(rate), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        LinearProgressIndicator(progress = rate, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(8.dp)), color = successColor(rate), trackColor = Track)
-                    }
-                    val bal = balance
-                    if (bal != null && bal.channels.isNotEmpty()) {
-                        Spacer(Modifier.height(10.dp))
-                        Divider(color = Track, thickness = 0.8.dp)
-                        Spacer(Modifier.height(8.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("渠道余额", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                        }
-                        Spacer(Modifier.height(6.dp))
-                        bal.channels.forEachIndexed { idx, ch ->
-                            if (idx > 0) {
-                                Spacer(Modifier.height(6.dp))
-                                Divider(color = Track, thickness = 0.7.dp)
-                                Spacer(Modifier.height(6.dp))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                Text("整体成功率", color = Muted, fontSize = 11.sp)
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "${(rate * 100).toInt()}%",
+                                    color = successColor(rate),
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp
+                                )
                             }
-                            // WorkBuddy 风格：以每月 1 号余额作为"本月总额"参考，画进度条+剩余%
-                            val total = ch.monthStartUsd
-                            val pct = if (ch.usd != null && total != null && total > 0) (ch.usd / total).toFloat() else null
-                            val clickable = ch.name == "pipio" || ch.name == "pipio2"
+                            Box(Modifier.width(1.dp).height(36.dp).background(Track))
                             Row(
-                                Modifier.fillMaxWidth().then(if (clickable) Modifier.clickable { onPipioClick(ch.name) } else Modifier),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.End,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(ch.name, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                                    if (clickable) {
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("查看日报 ›", color = Blue, fontSize = 10.sp)
-                                    }
-                                }
-                                if (ch.usd != null && total != null) {
-                                    Text(
-                                        "$${"%.2f".format(ch.usd)} / $${"%.2f".format(total)}",
-                                        color = gatewayRatioColor(pct), fontSize = 12.sp, fontWeight = FontWeight.SemiBold
-                                    )
-                                } else if (ch.usd != null) {
-                                    Text("$${"%.2f".format(ch.usd)}", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                                } else {
-                                    Text("⚠️ 查询失败", color = Amber, fontSize = 11.sp)
-                                }
-                            }
-                            if (pct != null) {
-                                Spacer(Modifier.height(4.dp))
-                                LinearProgressIndicator(
-                                    progress = gatewayProgress(pct),
-                                    modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(8.dp)),
-                                    color = gatewayRatioColor(pct), trackColor = Track
+                                Text("今日 Token", color = Muted, fontSize = 11.sp)
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    overviewDailyTokenLabel(usage),
+                                    color = Blue,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(Modifier.height(2.dp))
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                    Text(gatewayRemainingLabel(pct, "月初余额"), color = gatewayRatioColor(pct), fontSize = 10.sp)
-                                    if (ch.todayUsedUsd != null) {
-                                        Text("今日消耗 $" + "%.2f".format(ch.todayUsedUsd), color = Amber, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                                    }
-                                }
-                            } else if (ch.todayUsedUsd != null) {
-                                Spacer(Modifier.height(2.dp))
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                    Text("今日消耗 $" + "%.2f".format(ch.todayUsedUsd), color = Amber, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                                }
                             }
                         }
                         Spacer(Modifier.height(6.dp))
-                        Divider(color = Track, thickness = 0.7.dp)
-                        Spacer(Modifier.height(6.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("合计", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-                            Text("$${"%.2f".format(bal.total)}", color = Blue, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        }
+                        LinearProgressIndicator(progress = rate, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(8.dp)), color = successColor(rate), trackColor = Track)
                     }
+                }
+            }
+            val pipioChannels = balance?.channels.orEmpty().filter { it.name == "pipio" || it.name == "pipio2" }
+            if (pipioChannels.isNotEmpty()) {
+                item {
+                    PipioAccountCard(
+                        channels = pipioChannels,
+                        updatedAt = balance?.updatedAt.orEmpty(),
+                        onPipioClick = onPipioClick
+                    )
                 }
             }
             val wbPool = balance?.workbuddy
@@ -803,6 +910,21 @@ private fun GatewayOverviewPage(
                         Spacer(Modifier.height(4.dp))
                         Text("⚠️ $wbErr", color = Amber, fontSize = 12.sp)
                     }
+                }
+            }
+            val qoderPools = balance?.qoderPools.orEmpty().ifEmpty {
+                listOfNotNull(balance?.qoder?.copy(
+                    error = balance?.qoderError,
+                    id = balance?.qoder?.id ?: "default",
+                    label = balance?.qoder?.label ?: "主实例"
+                ))
+            }
+            if (qoderPools.any { it.accounts.isNotEmpty() }) {
+                item {
+                    QoderAccountCard(
+                        pools = qoderPools,
+                        updatedAt = balance?.updatedAt.orEmpty()
+                    )
                 }
             }
         } else {
@@ -902,6 +1024,115 @@ private fun PipioMetric(label: String, quota: Double?, modifier: Modifier = Modi
     }
 }
 
+@Composable
+private fun PipioAccountCard(
+    channels: List<NewApiBalanceChannel>,
+    updatedAt: String,
+    onPipioClick: (String) -> Unit
+) {
+    var cardExpanded by remember { mutableStateOf(false) }
+    var expandedGroups by remember { mutableStateOf(mutableSetOf<String>()) }
+    val totalRemaining = channels.mapNotNull { it.usd }.takeIf { it.isNotEmpty() }?.sum()
+    GatewayCard {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button) {
+                cardExpanded = !cardExpanded
+                if (!cardExpanded) expandedGroups = mutableSetOf()
+            },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Pipio 账号", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text(
+                    "账号 ${channels.size} 个 · 更新 $updatedAt",
+                    color = Muted, fontSize = 10.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
+            Text(
+                totalRemaining?.let { "总额度 $${"%.2f".format(it)}" } ?: "总额度 --",
+                color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+        }
+        if (cardExpanded) {
+            Spacer(Modifier.height(6.dp))
+            channels.forEachIndexed { index, channel ->
+                if (index > 0) {
+                    Spacer(Modifier.height(6.dp))
+                    Divider(color = Track, thickness = 0.7.dp)
+                    Spacer(Modifier.height(6.dp))
+                }
+                val expanded = channel.name in expandedGroups
+                val total = channel.monthStartUsd
+                val pct = if (channel.usd != null && total != null && total > 0) (channel.usd / total).toFloat() else null
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button) {
+                        val next = expandedGroups.toMutableSet()
+                        if (expanded) next.remove(channel.name) else next.add(channel.name)
+                        expandedGroups = next
+                    },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("${if (expanded) "▾" else "▸"} ${channel.name}", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            channel.error?.let { "⚠️ $it" } ?: "账号 1 个",
+                            color = if (channel.error != null) Amber else Muted,
+                            fontSize = 10.sp
+                        )
+                    }
+                    Text(
+                        channel.usd?.let { "$${"%.2f".format(it)}" } ?: "--",
+                        color = gatewayRatioColor(pct), fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                    )
+                }
+                if (expanded) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onPipioClick(channel.name) },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("当前余额", color = Ink, fontSize = 11.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (channel.usd != null && total != null) {
+                                    "$${"%.2f".format(channel.usd)} / $${"%.2f".format(total)}"
+                                } else {
+                                    channel.usd?.let { "$${"%.2f".format(it)}" } ?: "--"
+                                },
+                                color = gatewayRatioColor(pct), fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text("查看日报 ›", color = Blue, fontSize = 11.sp)
+                        }
+                    }
+                    if (pct != null) {
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = gatewayProgress(pct),
+                            modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(8.dp)),
+                            color = gatewayRatioColor(pct), trackColor = Track
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(gatewayRemainingLabel(pct, "月初余额"), color = gatewayRatioColor(pct), fontSize = 10.sp)
+                            if (channel.todayUsedUsd != null) {
+                                Text("今日消耗 $" + "%.2f".format(channel.todayUsedUsd), color = Amber, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+                    } else if (channel.todayUsedUsd != null) {
+                        Spacer(Modifier.height(2.dp))
+                        Text("今日消耗 $" + "%.2f".format(channel.todayUsedUsd), color = Amber, fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
 private fun probeStatusLabel(status: String): String = when (status) {
     "healthy" -> "正常"
     "degraded" -> "降级"
@@ -981,6 +1212,162 @@ private fun maskNickname(name: String): String {
 }
 
 @Composable
+private fun QoderAccountCard(pools: List<QoderPool>, updatedAt: String) {
+    var cardExpanded by remember { mutableStateOf(false) }
+    var expandedPools by remember { mutableStateOf(mutableSetOf<String>()) }
+    val visiblePools = pools.filter { it.accounts.isNotEmpty() || it.error != null }
+    if (visiblePools.isEmpty()) return
+    val totalAccounts = visiblePools.sumOf { it.summary.total }
+    val totalRemaining = visiblePools.mapNotNull { it.summary.remainingCredits }.takeIf { it.isNotEmpty() }?.sum()
+    GatewayCard {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button) {
+                cardExpanded = !cardExpanded
+                if (!cardExpanded) expandedPools = mutableSetOf()
+            },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Qoder 账号", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("账号 $totalAccounts 个 · 更新 $updatedAt", color = Muted, fontSize = 10.sp)
+            }
+            Text(
+                totalRemaining?.let { "总额度 ${formatQoderNumber(it)}" } ?: "总额度 --",
+                color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+        }
+        if (cardExpanded) Spacer(Modifier.height(6.dp))
+        if (cardExpanded) visiblePools.forEachIndexed { index, pool ->
+            val label = pool.label.ifBlank { if (pool.id == "b") "B 实例" else "主实例" }
+            val expanded = label in expandedPools
+            val poolError = pool.error
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                    .clickable(role = Role.Button) {
+                        val next = expandedPools.toMutableSet()
+                        if (expanded) next.remove(label) else next.add(label)
+                        expandedPools = next
+                    },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "${if (expanded) "▾" else "▸"} $label",
+                        color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        buildString {
+                            append("账号 ${pool.summary.total} 个")
+                            append(" · 可用 ${pool.summary.healthy}")
+                            if (pool.summary.cooldown > 0) append(" · 冷却 ${pool.summary.cooldown}")
+                            if (pool.summary.disabled > 0) append(" · 禁用 ${pool.summary.disabled}")
+                        },
+                        color = Muted, fontSize = 10.sp
+                    )
+                }
+                pool.summary.remainingCredits?.let {
+                    Text("${formatQoderNumber(it)}", color = Ink, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            poolError?.takeIf { it.isNotBlank() }?.let {
+                Text("⚠️ $it", color = Amber, fontSize = 10.sp, modifier = Modifier.padding(bottom = 4.dp))
+            }
+            if (expanded) {
+                pool.accounts.forEachIndexed { accountIndex, account ->
+                    if (accountIndex > 0) {
+                        Spacer(Modifier.height(8.dp))
+                        Divider(color = Track, thickness = 0.7.dp)
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    QoderAccountRow(account)
+                }
+            }
+            if (index < visiblePools.lastIndex) {
+                Divider(color = Track, thickness = 0.7.dp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun QoderAccountRow(account: QoderAccount) {
+    val statusLabel = when (account.status) {
+        "disabled" -> "禁用"
+        "cooldown" -> "冷却"
+        else -> "正常"
+    }
+    val statusColor = when (account.status) {
+        "disabled" -> Muted
+        "cooldown" -> Amber
+        else -> Green
+    }
+    val statusSurface = when (account.status) {
+        "disabled" -> BlueSoft
+        "cooldown" -> AmberSoft
+        else -> GreenSoft
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                statusLabel,
+                color = statusColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(statusSurface)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                account.nickname.ifBlank { account.uid.take(8).ifBlank { "Qoder" } },
+                color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+            )
+            account.realm?.takeIf { it.isNotBlank() }?.let {
+                Text(it.uppercase(), color = Subtle, fontSize = 9.sp)
+                Spacer(Modifier.width(6.dp))
+            }
+            account.plan?.takeIf { it.isNotBlank() }?.let {
+                Text(it, color = Muted, fontSize = 9.sp)
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        val remain = account.credits.remain
+        val used = account.credits.used
+        val size = account.credits.size
+        Text(
+            "剩余 ${formatQoderNumber(remain)} · 已用 ${formatQoderNumber(used)} · 总量 ${formatQoderNumber(size)}",
+            color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Medium
+        )
+        if (size != null && size > 0 && remain != null) {
+            val ratio = (remain / size).toFloat().coerceIn(0f, 1f)
+            Spacer(Modifier.height(4.dp))
+            LinearProgressIndicator(
+                progress = ratio,
+                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(8.dp)),
+                color = creditColor(ratio), trackColor = Track
+            )
+        }
+        account.lastError?.takeIf { it.isNotBlank() }?.let {
+            Spacer(Modifier.height(3.dp))
+            Text("最近错误 $it", color = Amber, fontSize = 9.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        if (account.status == "cooldown") {
+            account.cooldownUntil?.takeIf { it.isNotBlank() }?.let {
+                Spacer(Modifier.height(3.dp))
+                Text("冷却至 $it", color = Amber, fontSize = 9.sp)
+            }
+        }
+    }
+}
+
+private fun formatQoderNumber(value: Double?): String {
+    if (value == null) return "--"
+    return if (value % 1.0 == 0.0) "%,d".format(Locale.US, value.toLong())
+    else "%.2f".format(Locale.US, value)
+}
+
+@Composable
 private fun WorkBuddyAccountCard(
     pool: WorkBuddyPool,
     updatedAt: String,
@@ -989,32 +1376,33 @@ private fun WorkBuddyAccountCard(
     onToggle: (WorkBuddyAccount) -> Unit
 ) {
     var pendingAccount by remember { mutableStateOf<WorkBuddyAccount?>(null) }
+    var cardExpanded by remember { mutableStateOf(false) }
     var expandedGroups by remember { mutableStateOf(mutableSetOf<String>()) }
     GatewayCard {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("WorkBuddy 账号", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-            Text("更新 $updatedAt", color = Muted, fontSize = 10.sp)
-        }
-        Spacer(Modifier.height(4.dp))
-        val summary = buildString {
-            append("共 ${pool.total} 个")
-            append(" · 可用 ${pool.healthy}")
-            if (pool.cooling > 0) append(" · 冷却 ${pool.cooling}")
-            if (pool.disabled > 0) append(" · 禁用 ${pool.disabled}")
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(summary, color = Muted, fontSize = 11.sp)
-            val allAccounts = pool.groups.flatMap { it.accounts }
-            val totalCredits = allAccounts.mapNotNull { it.credits }.takeIf { it.size == allAccounts.size }?.sum()
-            if (totalCredits != null) {
-                Text("余额汇总 ${"%,d".format(totalCredits)}", color = Ink, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        val allAccounts = pool.groups.flatMap { it.accounts }
+        val totalCredits = allAccounts.mapNotNull { it.credits }.takeIf { it.size == allAccounts.size }?.sum()
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button) {
+                cardExpanded = !cardExpanded
+                if (!cardExpanded) expandedGroups = mutableSetOf()
+            },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("WorkBuddy 账号", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("账号 ${pool.total} 个 · 更新 $updatedAt", color = Muted, fontSize = 10.sp)
             }
+            Text(
+                totalCredits?.let { "总额度 ${"%,d".format(it)}" } ?: "总额度 --",
+                color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
         }
         actionError?.let {
             Spacer(Modifier.height(4.dp))
             Text("⚠️ $it", color = Amber, fontSize = 11.sp)
         }
-        Spacer(Modifier.height(8.dp))
+        if (cardExpanded) Spacer(Modifier.height(8.dp))
 
         // 全局判定：有在飞的分组都算正在使用；没有在飞时，只标最近一次请求落点，
         // 避免多个分组各自带着 30 分钟内的历史 last_account 而同时显示「正在使用」。
@@ -1025,7 +1413,7 @@ private fun WorkBuddyAccountCard(
                 .maxByOrNull { it.second }?.first
         } else null
 
-        pool.groups.forEach { group ->
+        if (cardExpanded) pool.groups.forEach { group ->
             val expanded = group.id in expandedGroups
             Row(
                 Modifier
@@ -1144,10 +1532,16 @@ private fun WorkBuddyAccountCard(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("剩余 ${"%.0f".format(pct * 100)}%", color = creditColor(pct), fontSize = 10.sp)
-                                if (acct.todayUsed != null) {
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("今日 Token 消耗 ${"%,d".format(acct.todayUsed)}", color = Amber, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                                }
+                                Spacer(Modifier.width(8.dp))
+                                val todayCredits = acct.todayUsed
+                                    ?.takeIf { acct.todayUsedValid }
+                                    ?.let { "%,d".format(it) } ?: "--"
+                                Text(
+                                    "今日积分消耗 $todayCredits",
+                                    color = Amber,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
                             }
                             val detail = buildString {
                                 if (acct.successCount != null) append("成功 ${acct.successCount}")
@@ -1190,7 +1584,7 @@ private fun GatewayProbeCard(
 ) {
     GatewayCard {
         if (probe == null) {
-            Text("模型/模型池探针", color = Ink, fontWeight = FontWeight.SemiBold)
+            Text("模型探针", color = Ink, fontWeight = FontWeight.SemiBold)
             Text("等待探针结果…", color = Muted, fontSize = 11.sp)
             // 亲和性仍展示，避免 probe 为空时无法操作
             Spacer(Modifier.height(8.dp))
@@ -1223,7 +1617,7 @@ private fun GatewayProbeCard(
 
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("模型/模型池探针", color = Ink, fontWeight = FontWeight.SemiBold)
+                Text("模型探针", color = Ink, fontWeight = FontWeight.SemiBold)
                 Text(probe.checkedAt?.replace("T", " ")?.take(16) ?: "暂无时间", color = Muted, fontSize = 11.sp)
             }
             Surface(color = probeStatusSurface(status), shape = RoundedCornerShape(6.dp)) {
@@ -1348,32 +1742,394 @@ private fun GatewayMetricCell(label: String, value: String, accent: Color, modif
     }
 }
 
+private const val PERFORMANCE_LOW_SAMPLE = 20
+
+private data class PerformanceSummary(
+    val requests: Int,
+    val success: Int,
+    val failed: Int,
+    val cancelled: Int,
+    val unknown: Int,
+    val measured: Int,
+    val successRate: Double?,
+    val weightedUseTimeMs: Double?
+)
+
+private fun performanceSummary(rows: List<NewApiModelPerformance>): PerformanceSummary {
+    val requests = rows.sumOf { it.requests }
+    val success = rows.sumOf { it.success }
+    val failed = rows.sumOf { it.failed }
+    val measured = success + failed
+    val useTimeWeighted = rows.sumOf { it.avgUseTime * it.requests }
+    return PerformanceSummary(
+        requests = requests,
+        success = success,
+        failed = failed,
+        cancelled = rows.sumOf { it.clientCancelled },
+        unknown = rows.sumOf { it.unknown },
+        measured = measured,
+        successRate = if (measured > 0) success * 100.0 / measured else null,
+        weightedUseTimeMs = if (requests > 0) useTimeWeighted / requests else null
+    )
+}
+
+private fun performanceRate(models: List<NewApiModelPerformance>): Double? {
+    val measured = models.sumOf { it.success + it.failed }
+    return if (measured > 0) models.sumOf { it.success } * 100.0 / measured else null
+}
+
+private fun formatPerformanceRate(rate: Double?): String =
+    rate?.let { "${"%.1f".format(Locale.US, it)}%" } ?: "--"
+
+private fun formatPerformanceDuration(ms: Double?): String = when {
+    ms == null || ms <= 0 -> "--"
+    ms >= 1000 -> "${"%.2f".format(Locale.US, ms / 1000.0)}s"
+    else -> "${ms.roundToInt()}ms"
+}
+
+private fun formatPerformanceClock(at: Long): String =
+    if (at <= 0L) "--" else SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date(at))
+
 @Composable
-private fun GatewayPerformancePage(rows: List<NewApiModelPerformance>, loading: Boolean = false, error: String? = null) {
+private fun GatewayPerformancePage(
+    rows: List<NewApiModelPerformance>?,
+    loading: Boolean,
+    error: String?,
+    updatedAt: Long,
+    onRetry: () -> Unit
+) {
+    val models = remember(rows) { rows.orEmpty().sortedByDescending { it.requests } }
+    val summary = remember(models) { performanceSummary(models) }
+    val latencyModels = remember(models) {
+        models.filter { it.success + it.failed >= PERFORMANCE_LOW_SAMPLE }
+    }
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 16.dp),
         contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp + LocalFloatingNavigationPadding.current),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        if (rows.isEmpty()) item { GatewayEmpty(if (loading) "正在加载模型统计…" else (error ?: "暂无最近 24 小时模型请求")) }
-        item { Text("近 24 小时 · 按请求量排序", color = Muted, fontSize = 11.sp) }
-        items(rows.sortedByDescending { it.requests }) { model ->
-            val ratio = (model.successRate / 100).coerceIn(0.0, 1.0).toFloat()
-            val accent = successColor(ratio)
-            CompactCard {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(model.model, color = Ink, fontWeight = FontWeight.Medium, fontSize = 13.sp, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text("${"%.1f".format(model.successRate)}% 成功", color = accent, fontSize = 12.sp)
+        if (rows == null) {
+            item {
+                GatewayCard {
+                    if (error != null) {
+                        Text("近 24 小时性能统计加载失败", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(error, color = Red, fontSize = 12.sp)
+                        Spacer(Modifier.height(8.dp))
+                        PerformanceActionButton("重试", Blue, enabled = !loading, onClick = onRetry)
+                    } else {
+                        Text(if (loading) "正在加载近 24 小时模型统计…" else "正在准备性能统计…", color = Muted, fontSize = 13.sp)
+                    }
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(buildString {
-                    append("${model.requests} 次请求")
-                    if (model.failed > 0) append(" · ${model.failed} 次失败")
-                    if (model.clientCancelled > 0) append(" · ${model.clientCancelled} 次取消")
-                }, color = Muted, fontSize = 11.sp)
+            }
+        } else {
+            item { PerformanceSummaryCard(summary, loading, updatedAt) }
+            if (error != null) {
+                item {
+                    GatewayCard {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("显示上一次成功加载的数据", color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Text(error, color = Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            PerformanceActionButton("重试", Amber, enabled = !loading, onClick = onRetry)
+                        }
+                    }
+                }
+            }
+            if (models.isEmpty()) {
+                item {
+                    GatewayCard {
+                        Text("近 24 小时暂无模型请求", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Spacer(Modifier.height(8.dp))
+                        PerformanceActionButton("重新加载", Blue, enabled = !loading, onClick = onRetry)
+                    }
+                }
+            } else {
+                item { PerformanceDistributionCard(models) }
+                item { PerformanceSuccessCard(models) }
+                if (latencyModels.size >= 2) {
+                    item { PerformanceLatencyCard(latencyModels, summary.weightedUseTimeMs) }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun PerformanceSummaryCard(summary: PerformanceSummary, loading: Boolean, updatedAt: Long) {
+    GatewayCard {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("近 24 小时性能", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(
+                    "更新于 ${formatPerformanceClock(updatedAt)}",
+                    color = Muted, fontSize = 10.sp
+                )
+            }
+            StatusBadge(if (loading) "刷新中" else "24h", if (loading) "warn" else "info")
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            PerformanceMetricCell("24h 请求", formatUsageCount(summary.requests.toLong()), Blue, Modifier.weight(1f))
+            Box(Modifier.width(1.dp).height(36.dp).background(Track))
+            PerformanceMetricCell(
+                "整体成功率",
+                formatPerformanceRate(summary.successRate),
+                summary.successRate?.let { successColor((it / 100).toFloat()) } ?: Muted,
+                Modifier.weight(1f)
+            )
+            Box(Modifier.width(1.dp).height(36.dp).background(Track))
+            PerformanceMetricCell(
+                "加权平均耗时",
+                formatPerformanceDuration(summary.weightedUseTimeMs),
+                Purple,
+                Modifier.weight(1f)
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            PerformanceCountChip("成功 ${formatUsageCount(summary.success.toLong())}", Green, Modifier.weight(1f))
+            PerformanceCountChip("失败 ${formatUsageCount(summary.failed.toLong())}", Red, Modifier.weight(1f))
+            PerformanceCountChip("取消 ${formatUsageCount(summary.cancelled.toLong())}", Amber, Modifier.weight(1f))
+            PerformanceCountChip("未知 ${formatUsageCount(summary.unknown.toLong())}", Muted, Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun PerformanceMetricCell(label: String, value: String, accent: Color, modifier: Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            value, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = accent,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(label, fontSize = 9.sp, color = Muted, maxLines = 2, textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+private fun PerformanceCountChip(label: String, color: Color, modifier: Modifier = Modifier) {
+    Text(
+        label, color = color, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        textAlign = TextAlign.Center,
+        modifier = modifier.clip(RoundedCornerShape(7.dp)).background(color.copy(alpha = 0.1f)).padding(vertical = 5.dp, horizontal = 4.dp)
+    )
+}
+
+@Composable
+private fun PerformanceDistributionCard(models: List<NewApiModelPerformance>) {
+    val total = models.sumOf { it.requests }.coerceAtLeast(1)
+    GatewayCard {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column {
+                Text("模型请求占比", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            }
+            Text("${models.size} 个模型", color = Muted, fontSize = 10.sp)
+        }
+        Spacer(Modifier.height(10.dp))
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (maxWidth >= 360.dp) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    PerformanceDonut(models, Modifier.size(176.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f).heightIn(max = 230.dp).verticalScroll(rememberScrollState())) {
+                        models.forEachIndexed { index, model ->
+                            PerformanceModelDetailRow(model, index, total)
+                            if (index < models.lastIndex) Divider(color = Track.copy(alpha = 0.5f), thickness = 0.5.dp)
+                        }
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    PerformanceDonut(models, Modifier.size(150.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Column(Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
+                        models.forEachIndexed { index, model ->
+                            PerformanceModelDetailRow(model, index, total)
+                            if (index < models.lastIndex) Divider(color = Track.copy(alpha = 0.5f), thickness = 0.5.dp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PerformanceDonut(models: List<NewApiModelPerformance>, modifier: Modifier) {
+    val total = models.sumOf { it.requests }.coerceAtLeast(1)
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Canvas(
+            Modifier.fillMaxSize().padding(8.dp).semantics {
+                contentDescription = "模型请求占比环形图，共 $total 次请求"
+            }
+        ) {
+            val stroke = 16.dp.toPx()
+            val diameter = size.minDimension - stroke
+            val topLeft = androidx.compose.ui.geometry.Offset(
+                (size.width - diameter) / 2f, (size.height - diameter) / 2f
+            )
+            val arcSize = androidx.compose.ui.geometry.Size(diameter, diameter)
+            drawArc(Track, 0f, 360f, false, topLeft, arcSize, style = Stroke(stroke))
+            var start = -90f
+            models.forEachIndexed { index, item ->
+                val sweep = 360f * item.requests / total
+                if (sweep > 0f) {
+                    drawArc(
+                        usagePalette[index % usagePalette.size], start, (sweep - 1.2f).coerceAtLeast(0.6f), false,
+                        topLeft, arcSize, style = Stroke(stroke, cap = StrokeCap.Butt)
+                    )
+                }
+                start += sweep
+            }
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(formatUsageCount(total.toLong()), color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("请求", color = Muted, fontSize = 10.sp)
+        }
+    }
+}
+
+@Composable
+private fun PerformanceModelDetailRow(model: NewApiModelPerformance, index: Int, total: Int) {
+    val measured = model.success + model.failed
+    val rate = if (measured > 0) model.success * 100.0 / measured else null
+    val share = model.requests * 100.0 / total.coerceAtLeast(1)
+    Column(Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(usagePalette[index % usagePalette.size]))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                model.model, color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(formatUsageCount(model.requests.toLong()), color = Ink, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            Text(" · ${"%.1f".format(Locale.US, share)}%", color = Muted, fontSize = 9.sp)
+        }
+        Spacer(Modifier.height(3.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (rate == null) "无有效结果" else "成功 ${formatPerformanceRate(rate)}",
+                color = rate?.let { successColor((it / 100).toFloat()) } ?: Muted,
+                fontSize = 9.sp, fontWeight = FontWeight.SemiBold
+            )
+            Text("失败 ${model.failed}", color = if (model.failed > 0) Red else Muted, fontSize = 9.sp)
+            Text("取消 ${model.clientCancelled}", color = if (model.clientCancelled > 0) Amber else Muted, fontSize = 9.sp)
+        }
+    }
+}
+
+@Composable
+private fun PerformanceSuccessCard(models: List<NewApiModelPerformance>) {
+    val measuredRows = models.filter { it.success + it.failed > 0 }
+        .sortedWith(compareByDescending<NewApiModelPerformance> { it.success.toDouble() / (it.success + it.failed) }
+            .thenByDescending { it.requests })
+    GatewayCard {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Top 模型成功率", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            }
+        }
+        if (measuredRows.isEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text("暂无可计算成功率的模型请求", color = Muted, fontSize = 11.sp)
+            return@GatewayCard
+        }
+        Spacer(Modifier.height(10.dp))
+        measuredRows.take(6).forEachIndexed { index, model ->
+            if (index > 0) Spacer(Modifier.height(10.dp))
+            val measured = model.success + model.failed
+            val rate = model.success.toFloat() / measured
+            val accent = successColor(rate)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    model.model, color = Ink, fontSize = 11.sp, modifier = Modifier.weight(1f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("${"%.1f".format(Locale.US, rate * 100)}%", color = accent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(" · ${measured} 次有效", color = Muted, fontSize = 9.sp)
+            }
+            Spacer(Modifier.height(5.dp))
+            Box(Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(6.dp)).background(Track)) {
+                Box(
+                    Modifier.fillMaxWidth(rate.coerceIn(0f, 1f)).fillMaxHeight()
+                        .clip(RoundedCornerShape(6.dp)).background(accent)
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "成功 ${model.success} · 失败 ${model.failed} · 取消 ${model.clientCancelled} · 总请求 ${model.requests}",
+                color = Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun PerformanceLatencyCard(
+    qualified: List<NewApiModelPerformance>,
+    weightedOverall: Double?
+) {
+    val shown = qualified.sortedByDescending { it.requests }.take(6)
+    val maxMs = shown.maxOfOrNull { it.avgUseTime }?.coerceAtLeast(1.0) ?: 1.0
+    GatewayCard {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("平均耗时对比", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            }
+            Text("加权 ${formatPerformanceDuration(weightedOverall)}", color = Purple, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(10.dp))
+        shown.forEachIndexed { index, model ->
+            if (index > 0) Spacer(Modifier.height(9.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    model.model, color = Ink, fontSize = 11.sp, modifier = Modifier.weight(1f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(formatPerformanceDuration(model.avgUseTime), color = Purple, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                Text(" · ${model.requests} 次", color = Muted, fontSize = 9.sp)
+            }
+            Spacer(Modifier.height(5.dp))
+            Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(6.dp)).background(Track)) {
+                Box(
+                    Modifier.fillMaxWidth((model.avgUseTime / maxMs).toFloat().coerceIn(0.02f, 1f))
+                        .fillMaxHeight().clip(RoundedCornerShape(6.dp)).background(Blue)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PerformanceActionButton(
+    label: String,
+    color: Color,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Text(
+        label,
+        color = if (enabled) color else Muted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+            .heightIn(min = 44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (enabled) color.copy(alpha = 0.12f) else Track)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 12.dp)
+    )
 }
 
 @Composable
@@ -1586,14 +2342,67 @@ private fun GatewayUsagePage(
             item { GatewayEmpty("该窗口暂无模型调用记录") }
         } else {
             item { UsageDistributionCard(models) }
+            item { UsageAccountCard(current?.accounts.orEmpty()) }
             item {
                 UsageTrendCard(
                     daily = data.daily,
+                    hourly = data.hourly,
+                    window = window,
                     startDate = current?.startDate.orEmpty(),
                     selectedIndex = selectedTrendIndex,
                     onSelect = { selectedTrendIndex = it }
                 )
             }
+        }
+    }
+}
+
+internal fun usageAccountDisplayName(accountName: String): String =
+    accountName.trim().ifEmpty { "未知账号" }
+
+internal fun usageAccountSort(accounts: List<NewApiUsageAccount>): List<NewApiUsageAccount> =
+    accounts.sortedWith(compareByDescending<NewApiUsageAccount> { it.requests }.thenBy { usageAccountDisplayName(it.accountName) })
+
+@Composable
+private fun UsageAccountCard(accounts: List<NewApiUsageAccount>) {
+    val sorted = remember(accounts) { usageAccountSort(accounts) }
+    var expandedAccount by remember(sorted) { mutableStateOf<String?>(null) }
+    GatewayCard {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("账号用量", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text("${sorted.size} 个活跃账号", color = Muted, fontSize = 10.sp)
+        }
+        Spacer(Modifier.height(8.dp))
+        if (sorted.isEmpty()) {
+            GatewayEmpty("该窗口暂无账号调用记录")
+            return@GatewayCard
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
+            Text("账号", color = Muted, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            Text("请求数", color = Muted, fontSize = 10.sp, modifier = Modifier.width(58.dp), textAlign = TextAlign.End)
+            Text("Token 数", color = Muted, fontSize = 10.sp, modifier = Modifier.width(66.dp), textAlign = TextAlign.End)
+        }
+        Divider(color = Track, thickness = 0.7.dp)
+        sorted.forEachIndexed { index, item ->
+            val name = usageAccountDisplayName(item.accountName)
+            val expanded = expandedAccount == item.accountId
+            Row(
+                Modifier.fillMaxWidth().clickable { expandedAccount = if (expanded) null else item.accountId }
+                    .padding(horizontal = 4.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(usagePalette[index % usagePalette.size]))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    name, color = Ink, fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = if (expanded) 3 else 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(formatUsageCount(item.requests), color = Ink, fontSize = 10.sp, modifier = Modifier.width(58.dp), textAlign = TextAlign.End, maxLines = 1)
+                Text(formatUsageCount(item.tokens), color = Ink, fontSize = 10.sp, modifier = Modifier.width(66.dp), textAlign = TextAlign.End, maxLines = 1)
+            }
+            Divider(color = Track.copy(alpha = 0.55f), thickness = 0.5.dp)
         }
     }
 }
@@ -1720,56 +2529,146 @@ private fun UsageModelTable(models: List<NewApiUsageModel>, modifier: Modifier) 
     }
 }
 
-private data class UsageTrendPoint(val label: String, val requests: Long, val tokens: Long)
+internal data class UsageTrendPoint(
+    val label: String,
+    val requests: Long,
+    val tokens: Long,
+    val hourStart: String = ""
+)
+
+internal fun usageTrendPoints(
+    daily: List<NewApiUsageDaily>,
+    hourly: List<NewApiUsageHourly>,
+    window: String,
+    startDate: String
+): List<UsageTrendPoint> {
+    if (window == "1d") {
+        val byHour = hourly.groupBy { it.hourStart }
+            .mapValues { (_, rows) -> rows.sumOf { it.requests } to rows.sumOf { it.tokens } }
+        val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
+        val hourFormatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:00:00", Locale.US)
+        val labelFormatter = java.time.format.DateTimeFormatter.ofPattern("HH:mm", Locale.US)
+        val latest = hourly.mapNotNull { item ->
+            runCatching { formatter.parse(item.hourStart) }.getOrNull()
+        }.maxOrNull()
+        if (latest == null) return emptyList()
+        val latestHour = latest.toInstant().atZone(java.time.ZoneId.systemDefault())
+            .withMinute(0).withSecond(0).withNano(0)
+        return (11 downTo 0).map { offset ->
+            val hour = latestHour.minusHours(offset.toLong())
+            val key = hour.format(hourFormatter)
+            val (requests, tokens) = byHour[key] ?: (0L to 0L)
+            UsageTrendPoint(
+                label = hour.format(labelFormatter),
+                requests = requests,
+                tokens = tokens,
+                hourStart = key
+            )
+        }
+    }
+    return daily.filter { it.date >= startDate }
+        .groupBy { it.date }
+        .map { (date, rows) -> UsageTrendPoint(date.takeLast(5), rows.sumOf { it.requests }, rows.sumOf { it.tokens }) }
+        .sortedBy { it.label }
+}
+
+internal fun usageTrendTickCount(window: String, pointCount: Int, availableWidthDp: Float): Int {
+    if (pointCount <= 0) return 0
+    if (pointCount == 1) return 1
+    val target = when (window) {
+        "1d" -> 7
+        "7d" -> 5
+        else -> 7
+    }
+    val fit = (availableWidthDp / 46f).toInt().coerceAtLeast(1)
+    return target.coerceAtMost(fit).coerceAtMost(pointCount)
+}
+
+internal fun usageTrendTickIndices(window: String, pointCount: Int, availableWidthDp: Float): List<Int> {
+    val count = usageTrendTickCount(window, pointCount, availableWidthDp)
+    if (count <= 0) return emptyList()
+    if (count == 1) return listOf(0)
+    return (0 until count).map { index ->
+        (index.toFloat() * (pointCount - 1) / (count - 1)).roundToInt()
+    }.distinct()
+}
 
 @Composable
 private fun UsageTrendCard(
     daily: List<NewApiUsageDaily>,
+    hourly: List<NewApiUsageHourly>,
+    window: String,
     startDate: String,
     selectedIndex: Int?,
     onSelect: (Int?) -> Unit
 ) {
     val gridColor = if (isDarkTheme()) Color(0xFF374151) else Color(0xFFE5E7EB)
-    val points = daily.filter { it.date >= startDate }
-        .groupBy { it.date }
-        .map { (date, rows) -> UsageTrendPoint(date.takeLast(5), rows.sumOf { it.requests }, rows.sumOf { it.tokens }) }
-        .sortedBy { it.label }
+    val points = usageTrendPoints(daily, hourly, window, startDate)
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val axisLabelStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, color = Muted)
+    val maxLabelWidthDp = remember(points, axisLabelStyle) {
+        points.maxOfOrNull { point ->
+            with(density) { textMeasurer.measure(point.label, axisLabelStyle).size.width.toDp().value }
+        } ?: 30f
+    }
+    LaunchedEffect(points) {
+        if (points.size == 1) onSelect(0)
+    }
     GatewayCard {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column {
-                Text("用量趋势", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                Text("请求数与 Token 变化", color = Muted, fontSize = 11.sp)
-            }
+            Text(
+                if (window == "1d") "最近 12 小时" else "用量趋势",
+                color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 UsageLegendDot("请求数", usagePalette[0])
                 UsageLegendDot("Token", usagePalette[1])
             }
         }
         if (points.isEmpty()) {
-            Text("该窗口暂无每日数据", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 12.dp))
+            Text(
+                if (window == "1d") "今天暂无小时数据" else "该窗口暂无每日数据",
+                color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 12.dp)
+            )
             return@GatewayCard
         }
         Spacer(Modifier.height(10.dp))
-        Box(Modifier.fillMaxWidth().height(192.dp)) {
-            Canvas(
-                Modifier.fillMaxSize().pointerInput(points) {
-                    detectTapGestures { offset ->
-                        val left = 10.dp.toPx()
-                        val right = size.width - 12.dp.toPx()
-                        val index = ((offset.x - left) / ((right - left).coerceAtLeast(1f)) * (points.size - 1))
-                            .roundToInt().coerceIn(0, points.lastIndex)
-                        onSelect(index)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val chartMaxWidth = maxWidth
+            val maxRequests = points.maxOf { it.requests }.coerceAtLeast(1L)
+            val maxTokens = points.maxOf { it.tokens }.coerceAtLeast(1L)
+            val requestAxis = usageAxisTicks(maxRequests)
+            val tokenAxis = usageAxisTicks(maxTokens)
+            val leftAxisWidth = requestAxis.maxOf { formatUsageAxis(it).length }.coerceAtLeast(1) * 7f
+            val rightAxisWidth = tokenAxis.maxOf { formatUsageAxis(it).length }.coerceAtLeast(1) * 7f
+            val tickIndices = usageTrendTickIndices(
+                window = window,
+                pointCount = points.size,
+                availableWidthDp = (chartMaxWidth.value - leftAxisWidth - rightAxisWidth - maxLabelWidthDp).coerceAtLeast(1f)
+            )
+            Box(Modifier.fillMaxWidth().height(if (points.size == 1) 116.dp else 212.dp)) {
+                val leftPad = leftAxisWidth.dp
+                val rightPad = rightAxisWidth.dp
+                Canvas(
+                    Modifier.fillMaxSize().pointerInput(points) {
+                        detectTapGestures { offset ->
+                            val left = leftPad.toPx()
+                            val right = size.width - rightPad.toPx()
+                            val index = ((offset.x - left) / ((right - left).coerceAtLeast(1f)) * (points.size - 1))
+                                .roundToInt().coerceIn(0, points.lastIndex)
+                            onSelect(index)
+                        }
                     }
-                }
-            ) {
-                val left = 10.dp.toPx()
-                val right = size.width - 12.dp.toPx()
-                val top = 18.dp.toPx()
-                val bottom = size.height - 28.dp.toPx()
+                ) {
+                val left = leftPad.toPx()
+                val right = size.width - rightPad.toPx()
+                val top = 12.dp.toPx()
+                val bottom = size.height - 30.dp.toPx()
                 val innerWidth = (right - left).coerceAtLeast(1f)
                 val innerHeight = (bottom - top).coerceAtLeast(1f)
-                val maxRequests = points.maxOf { it.requests }.coerceAtLeast(1L)
-                val maxTokens = points.maxOf { it.tokens }.coerceAtLeast(1L)
+                val requestMax = requestAxis.last().coerceAtLeast(1L)
+                val tokenMax = tokenAxis.last().coerceAtLeast(1L)
                 for (i in 0..4) {
                     val y = top + innerHeight * i / 4f
                     drawLine(gridColor, androidx.compose.ui.geometry.Offset(left, y), androidx.compose.ui.geometry.Offset(right, y), 1.dp.toPx())
@@ -1834,18 +2733,71 @@ private fun UsageTrendCard(
                     return path
                 }
 
-                val tokenCoords = coordinates({ it.tokens }, maxTokens)
-                val requestCoords = coordinates({ it.requests }, maxRequests)
+                val tokenCoords = coordinates({ it.tokens }, tokenMax)
+                val requestCoords = coordinates({ it.requests }, requestMax)
                 drawPath(areaPath(tokenCoords), usagePalette[1].copy(alpha = 0.08f))
                 drawPath(areaPath(requestCoords), usagePalette[0].copy(alpha = 0.08f))
-                drawPath(monotonePath(tokenCoords), usagePalette[1], style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
-                drawPath(monotonePath(requestCoords), usagePalette[0], style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
+                if (points.size == 1) {
+                    val requestX = left + innerWidth * 0.38f
+                    val tokenX = left + innerWidth * 0.62f
+                    val halfSpan = innerWidth * 0.16f
+                    drawLine(
+                        usagePalette[1],
+                        androidx.compose.ui.geometry.Offset(tokenX - halfSpan, tokenCoords[0].y),
+                        androidx.compose.ui.geometry.Offset(tokenX + halfSpan, tokenCoords[0].y),
+                        2.dp.toPx(), StrokeCap.Round
+                    )
+                    drawLine(
+                        usagePalette[0],
+                        androidx.compose.ui.geometry.Offset(requestX - halfSpan, requestCoords[0].y),
+                        androidx.compose.ui.geometry.Offset(requestX + halfSpan, requestCoords[0].y),
+                        2.dp.toPx(), StrokeCap.Round
+                    )
+                    drawCircle(usagePalette[1], 5.dp.toPx(), androidx.compose.ui.geometry.Offset(tokenX, tokenCoords[0].y))
+                    drawCircle(usagePalette[0], 5.dp.toPx(), androidx.compose.ui.geometry.Offset(requestX, requestCoords[0].y))
+                } else {
+                    drawPath(monotonePath(tokenCoords), usagePalette[1], style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
+                    drawPath(monotonePath(requestCoords), usagePalette[0], style = Stroke(2.dp.toPx(), cap = StrokeCap.Round))
+                }
+                val axisTextSize = 9.sp.toPx()
+                val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Muted.toArgb()
+                    textSize = axisTextSize
+                }
+                requestAxis.forEachIndexed { index, value ->
+                    val y = bottom - innerHeight * index / (requestAxis.size - 1)
+                    val text = formatUsageAxis(value)
+                    val width = textPaint.measureText(text)
+                    drawIntoCanvas { canvas ->
+                        canvas.nativeCanvas.drawText(text, left - width - 5.dp.toPx(), y + axisTextSize * 0.35f, textPaint)
+                    }
+                }
+                tokenAxis.forEachIndexed { index, value ->
+                    val y = bottom - innerHeight * index / (tokenAxis.size - 1)
+                    drawIntoCanvas { canvas ->
+                        canvas.nativeCanvas.drawText(formatUsageAxis(value), right + 5.dp.toPx(), y + axisTextSize * 0.35f, textPaint)
+                    }
+                }
+                }
+                Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(22.dp)) {
+                    tickIndices.forEach { index ->
+                        val fraction = if (points.size <= 1) 0f else index.toFloat() / (points.size - 1)
+                        val labelWidth = maxLabelWidthDp.dp
+                        val center = (leftAxisWidth.dp + (chartMaxWidth - leftAxisWidth.dp - rightAxisWidth.dp) * fraction)
+                            .coerceIn(labelWidth / 2, chartMaxWidth - labelWidth / 2)
+                        Text(
+                            points[index].label,
+                            color = Muted,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .width(labelWidth)
+                                .offset(x = center - labelWidth / 2)
+                        )
+                    }
+                }
             }
-        }
-        Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(points.first().label, color = Muted, fontSize = 10.sp)
-            if (points.size > 2) Text(points[points.size / 2].label, color = Muted, fontSize = 10.sp)
-            Text(points.last().label, color = Muted, fontSize = 10.sp)
         }
         selectedIndex?.let { index ->
             points.getOrNull(index)?.let { point ->
@@ -1858,6 +2810,28 @@ private fun UsageTrendCard(
             }
         }
     }
+}
+
+internal fun usageAxisTicks(maxValue: Long): List<Long> {
+    val safe = maxValue.coerceAtLeast(1L)
+    val roughStep = (safe / 4.0).coerceAtLeast(1.0)
+    val magnitude = 10.0.pow(kotlin.math.floor(kotlin.math.log10(roughStep)))
+    val fraction = roughStep / magnitude
+    val step = when {
+        fraction <= 1.0 -> 1.0
+        fraction <= 2.0 -> 2.0
+        fraction <= 5.0 -> 5.0
+        else -> 10.0
+    } * magnitude
+    val top = kotlin.math.ceil(safe / step).toLong() * step.toLong()
+    return (0..4).map { index -> top * index / 4 }
+}
+
+internal fun formatUsageAxis(value: Long): String = when {
+    value >= 100_000_000L -> "${"%.1f".format(Locale.US, value / 100_000_000.0).trimEnd('0').trimEnd('.')}亿"
+    value >= 10_000L -> "${"%.0f".format(Locale.US, value / 10_000.0)}万"
+    value >= 1_000L -> "${"%.1f".format(Locale.US, value / 1_000.0)}k"
+    else -> value.toString()
 }
 
 @Composable

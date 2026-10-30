@@ -1094,6 +1094,89 @@ textarea:focus-visible,
   .usage-model-table-wrap { width: 100%; max-height: 220px; }
   .usage-card-head { flex-wrap: wrap; }
 }
+
+/* ── 网关性能页 ─────────────────────────────────────── */
+.gw-perf-summary { margin-bottom: 12px; }
+.gw-perf-counts { display: flex; flex-wrap: wrap; gap: 6px; }
+.gw-perf-count {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 24px;
+  padding: 2px 8px; border-radius: 999px; background: var(--tint);
+  color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
+}
+.gw-perf-count i { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.gw-perf-card { min-width: 0; }
+.gw-perf-distribution { align-items: start; }
+.gw-perf-table-wrap { max-height: none; overflow: visible; }
+.gw-perf-table th, .gw-perf-table td { padding-top: 6px; padding-bottom: 6px; }
+.gw-perf-table td:nth-child(n+2) { padding-left: 6px; padding-right: 6px; }
+.gw-perf-share { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }
+.gw-perf-low {
+  display: inline-block; margin-left: 4px; padding: 1px 5px;
+  border-radius: 999px; background: var(--amber-soft); color: var(--amber);
+  font-size: 9px; font-weight: 600; white-space: nowrap;
+}
+.gw-perf-bars { display: grid; gap: 12px; margin-top: 14px; }
+.gw-perf-bar-row { min-width: 0; }
+.gw-perf-bar-head {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px;
+  min-width: 0; margin-bottom: 5px;
+}
+.gw-perf-bar-name {
+  flex: 1 1 140px; min-width: 0; color: var(--ink); font-size: 11px; font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.gw-perf-bar-value {
+  color: var(--ink); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.gw-perf-bar-sample { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.gw-perf-bar-track {
+  height: 7px; border-radius: 7px; background: var(--track); overflow: hidden;
+}
+.gw-perf-bar-track > i {
+  display: block; height: 100%; border-radius: inherit; background: var(--accent);
+}
+.gw-perf-bar-foot {
+  margin-top: 4px; color: var(--muted); font-size: 9px;
+  overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+}
+.gw-perf-latency .gw-perf-bar-track { height: 6px; }
+.gw-perf-skeleton {
+  height: 86px; border-radius: 10px;
+  background: linear-gradient(90deg, var(--tint) 25%, var(--track) 50%, var(--tint) 75%);
+  background-size: 200% 100%; animation: gwPerfPulse 1.4s ease-in-out infinite;
+}
+@keyframes gwPerfPulse {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.gw-perf-setting-block { padding: 12px 0; border-bottom: 1px solid var(--track); min-width: 0; }
+.gw-perf-setting-block:first-child { padding-top: 0; }
+.gw-perf-setting-block:last-child { padding-bottom: 0; border-bottom: 0; }
+.policy-ch-select { max-width: 100%; }
+@media (max-width: 700px) {
+  .gw-perf-counts { gap: 5px; }
+  .gw-perf-distribution { grid-template-columns: 1fr; justify-items: center; }
+  .gw-perf-table-wrap { width: 100%; max-height: none; overflow: visible; }
+  .gw-perf-table { min-width: 0; }
+  .gw-perf-table thead { display: none; }
+  .gw-perf-table, .gw-perf-table tbody, .gw-perf-table tr, .gw-perf-table td { display: block; width: 100%; }
+  .gw-perf-table tr {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2px 8px; padding: 8px 0; border-top: 1px solid var(--track);
+  }
+  .gw-perf-table tr:first-child { border-top: 0; }
+  .gw-perf-table td { padding: 0 !important; border: 0; text-align: left !important; white-space: normal; font-size: 10px; }
+  .gw-perf-table td:first-child { grid-column: 1 / -1; white-space: normal; }
+  .gw-perf-table td:nth-child(2)::before { content: "请求 "; color: var(--muted); }
+  .gw-perf-table td:nth-child(3)::before { content: "成功 "; color: var(--muted); }
+  .gw-perf-table td:nth-child(4)::before { content: "失败 "; color: var(--muted); }
+  .gw-perf-table td:nth-child(5)::before { content: "取消 "; color: var(--muted); }
+  .gw-perf-table td:nth-child(6)::before { content: "样本 "; color: var(--muted); }
+  .gw-perf-share { display: inline; margin-left: 6px; }
+  .gw-perf-bar-name { flex-basis: 100%; }
+  .gw-perf-counts .gw-perf-count { font-size: 9px; }
+}
 .ui-section-detail > .card {
   margin-bottom: 8px; padding: 0; border: 0; background: transparent; box-shadow: none;
 }

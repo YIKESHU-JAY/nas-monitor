@@ -535,6 +535,7 @@ NAS_MESH_IP = os.environ.get("NAS_MESH_IP", "").strip()
 # 路由器（爱快）管理地址；留空则不采集路由器数据。
 ROUTER_HOST = os.environ.get("ROUTER_HOST", "").strip()
 ROUTER_BASE = os.environ.get("ROUTER_BASE", f"http://{ROUTER_HOST}" if ROUTER_HOST else "").rstrip("/")
+ROUTER_HTTPS_BASE = os.environ.get("ROUTER_HTTPS_BASE", f"https://{ROUTER_HOST}" if ROUTER_HOST else "").rstrip("/")
 # 局域网主网段前缀：同 MAC 多 IP 时优先保留该网段地址。
 LAN_PREFIX = os.environ.get("LAN_PREFIX", "192.168.").strip()
 
@@ -737,6 +738,28 @@ def get_public_ip():
     except:
         return ""
 
+def _router_login(base, ctx):
+    """Log in to iKuai and return the cookie header, or None when the base URL is unusable."""
+    md5pw = hashlib.md5(IKUAI_PASS.encode()).hexdigest()
+    data = json.dumps({"username": "admin", "passwd": md5pw}).encode()
+    req = urllib.request.Request(base + "/Action/login", data=data, method="POST")
+    req.add_header("Content-Type", "application/json; charset=utf-8")
+    with urllib.request.urlopen(req, timeout=5, context=ctx) as response:
+        cookies = response.headers.get_all("Set-Cookie")
+        if not cookies:
+            return None
+        return "; ".join(cookie.split(";")[0] for cookie in cookies)
+
+
+def _router_login_bases():
+    """Try the configured base first, then HTTPS for iKuai force-HTTPS deployments."""
+    bases = []
+    for base in (ROUTER_BASE, ROUTER_HTTPS_BASE):
+        if base and base not in bases:
+            bases.append(base)
+    return bases
+
+
 def get_router_status():
     """获取爱快路由器状态（WAN IP、在线设备、测速）。
 
@@ -750,22 +773,24 @@ def get_router_status():
         return _router_cache['data']
     import hashlib, json, urllib.request
     ctx = __import__('ssl')._create_unverified_context()
-    md5pw = hashlib.md5(IKUAI_PASS.encode()).hexdigest()
-    data = json.dumps({"username": "admin", "passwd": md5pw}).encode()
-    req = urllib.request.Request(ROUTER_BASE + "/Action/login", data=data, method="POST")
-    req.add_header("Content-Type", "application/json; charset=utf-8")
-    try:
-        with urllib.request.urlopen(req, timeout=5, context=ctx) as r:
-            cookies = r.headers.get_all("Set-Cookie")
-            if not cookies: return {"status": "down", "error": "login failed"}
-            cookie = "; ".join(c.split(";")[0] for c in cookies)
-    except Exception as e:
-        return {"status": "down", "error": str(e)[:60]}
+    router_base = None
+    login_errors = []
+    for base in _router_login_bases():
+        try:
+            cookie = _router_login(base, ctx)
+            if cookie:
+                router_base = base
+                break
+            login_errors.append(f"{base}: login failed")
+        except Exception as e:
+            login_errors.append(f"{base}: {str(e)[:60]}")
+    if router_base is None:
+        return {"status": "down", "error": "; ".join(login_errors)[:120]}
 
     def call_api(func_name, action="show", params=None):
         if params is None: params = {}
         p = json.dumps({"action": action, "func_name": func_name, "param": params}).encode()
-        r = urllib.request.Request(ROUTER_BASE + "/Action/call", data=p, method="POST")
+        r = urllib.request.Request(router_base + "/Action/call", data=p, method="POST")
         r.add_header("Content-Type", "application/json; charset=utf-8")
         r.add_header("Cookie", cookie)
         with urllib.request.urlopen(r, timeout=5, context=ctx) as resp:

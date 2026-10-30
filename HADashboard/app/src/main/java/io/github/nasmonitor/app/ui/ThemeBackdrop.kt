@@ -91,11 +91,11 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPurpleNight() {
 
 // ── 极光：真实极光光带（帘幕状，非波浪带），青绿/蓝紫多层，带微光晕 ──
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAurora(phase: Float) {
-    // 顶部大范围微光晕
-    drawCircle(Brush.radialGradient(listOf(Color(0xFF24D8B2).copy(alpha = 0.16f), Color.Transparent)), radius = size.width * 0.90f, center = Offset(size.width * 0.50f, size.height * 0.06f))
+    // 顶部大范围微光晕：略收敛，保留极光辨识度
+    drawCircle(Brush.radialGradient(listOf(Color(0xFF24D8B2).copy(alpha = 0.13f), Color.Transparent)), radius = size.width * 0.88f, center = Offset(size.width * 0.50f, size.height * 0.06f))
     // 三层极光帘幕
-    drawCurtain(baseY = 0.03f, height = 0.52f, lean = 0.10f, color = Color(0xFF39E0BC), alpha = 0.30f, phase = phase, freq = 1.0f)
-    drawCurtain(baseY = 0.10f, height = 0.46f, lean = -0.14f, color = Color(0xFF4E8CFF), alpha = 0.22f, phase = phase * 0.7f, freq = 1.3f)
+    drawCurtain(baseY = 0.03f, height = 0.52f, lean = 0.10f, color = Color(0xFF39E0BC), alpha = 0.27f, phase = phase, freq = 1.0f)
+    drawCurtain(baseY = 0.10f, height = 0.46f, lean = -0.14f, color = Color(0xFF4E8CFF), alpha = 0.20f, phase = phase * 0.7f, freq = 1.3f)
     drawCurtain(baseY = 0.18f, height = 0.40f, lean = 0.06f, color = Color(0xFF9A6BFF), alpha = 0.15f, phase = phase * 0.45f, freq = 0.8f)
     // 底部深色地平光
     drawRect(
@@ -109,9 +109,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAurora(phase: F
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSunset(phase: Float) {
     val sunX = size.width * (0.78f + 0.02f * sin(phase * 0.35f))
     val sunY = size.height * 0.18f
-    drawCircle(Brush.radialGradient(listOf(Color(0xFFFFB25F).copy(alpha = 0.72f), Color(0xFFFFB25F).copy(alpha = 0.10f), Color.Transparent)), radius = size.width * 0.62f, center = Offset(sunX, sunY))
-    drawCircle(Color(0xFFFFB15B).copy(alpha = 0.60f), radius = size.width * 0.13f, center = Offset(sunX, sunY))
-    drawCircle(Brush.radialGradient(listOf(Color(0xFFFFA06C).copy(alpha = 0.20f), Color.Transparent)), radius = size.width * 0.70f, center = Offset(size.width * 0.15f, size.height * 0.60f))
+    // 太阳与暖色光晕轻微收敛，保留日落主题差异
+    drawCircle(Brush.radialGradient(listOf(Color(0xFFFFB25F).copy(alpha = 0.64f), Color(0xFFFFB25F).copy(alpha = 0.08f), Color.Transparent)), radius = size.width * 0.60f, center = Offset(sunX, sunY))
+    drawCircle(Color(0xFFFFB15B).copy(alpha = 0.54f), radius = size.width * 0.12f, center = Offset(sunX, sunY))
+    drawCircle(Brush.radialGradient(listOf(Color(0xFFFFA06C).copy(alpha = 0.16f), Color.Transparent)), radius = size.width * 0.68f, center = Offset(size.width * 0.15f, size.height * 0.60f))
     drawCircle(Brush.radialGradient(listOf(Color(0xFFF58AB8).copy(alpha = 0.14f), Color.Transparent)), radius = size.width * 0.65f, center = Offset(size.width * 0.85f, size.height * 0.85f))
 }
 

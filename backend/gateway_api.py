@@ -34,7 +34,10 @@ MODEL_USAGE_DB = os.environ.get("NEWAPI_DB_PATH", "/new-api-data/new-api.db")
 MODEL_USAGE_WINDOWS = (("1d", 1), ("7d", 7), ("30d", 30))
 MODEL_USAGE_DB_TIMEOUT = 3.0
 MODEL_USAGE_MAX_MODELS = 500
+MODEL_USAGE_MAX_ACCOUNTS = 500
 MODEL_USAGE_MAX_DAILY = 5000
+MODEL_USAGE_MAX_HOURLY = 5000
+MODEL_USAGE_HOURLY_WINDOW = 12
 MODEL_USAGE_CACHE_SECONDS = 300
 MODEL_USAGE_RETRY_SECONDS = 60
 MODEL_USAGE_SNAPSHOT_FILE = Path(os.environ.get(
@@ -397,6 +400,10 @@ def _load_usage_aggregates_sqlite(db_path, starts, end):
         "created_at >= ? AND created_at < ? AND type IN (?, ?) "
         "AND model_name IS NOT NULL AND TRIM(model_name) <> ''"
     )
+    account_filter = (
+        "l.created_at >= ? AND l.created_at < ? AND l.type IN (?, ?) "
+        "AND l.model_name IS NOT NULL AND TRIM(l.model_name) <> ''"
+    )
     params = (int(starts["30d"]), int(end), LOG_TYPE_CONSUME, LOG_TYPE_ERROR)
     model_rows = _sqlite_aggregate(
         db_path,
@@ -428,6 +435,37 @@ def _load_usage_aggregates_sqlite(db_path, starts, end):
         ),
         MODEL_USAGE_MAX_MODELS,
     )
+    # 账号聚合与 model 使用同一窗口、日志类型和模型过滤；只读取 user_id/username，
+    # 账号显示名优先 users.username，其次 logs.username，均缺失归入“未知账号”。
+    account_rows = _sqlite_aggregate(
+        db_path,
+        "SELECT COALESCE(NULLIF(TRIM(CAST(l.user_id AS TEXT)), ''), NULLIF(TRIM(l.username), ''), '') AS account_id, "
+        "MAX(COALESCE(NULLIF(TRIM(u.username), ''), NULLIF(TRIM(l.username), ''), '')) AS account_name, "
+        "SUM(CASE WHEN l.created_at >= ? THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN l.created_at >= ? THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN l.created_at >= ? THEN 1 ELSE 0 END), "
+        "COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0), "
+        "COALESCE(SUM(l.quota), 0), "
+        "SUM(CASE WHEN l.type = ? AND l.created_at >= ? THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN l.created_at >= ? THEN l.prompt_tokens + l.completion_tokens ELSE 0 END), "
+        "SUM(CASE WHEN l.created_at >= ? THEN l.quota ELSE 0 END), "
+        "SUM(CASE WHEN l.created_at >= ? THEN l.prompt_tokens + l.completion_tokens ELSE 0 END), "
+        "SUM(CASE WHEN l.created_at >= ? THEN l.quota ELSE 0 END), "
+        "SUM(CASE WHEN l.type = ? AND l.created_at >= ? THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN l.type = ? AND l.created_at >= ? THEN 1 ELSE 0 END) "
+        "FROM logs l LEFT JOIN users u ON u.id = l.user_id WHERE " + account_filter +
+        " GROUP BY account_id ORDER BY 3 DESC, account_name ASC LIMIT ?",
+        (
+            int(starts["1d"]), int(starts["7d"]), int(starts["30d"]),
+            LOG_TYPE_ERROR, int(starts["1d"]),
+            int(starts["1d"]), int(starts["1d"]),
+            int(starts["7d"]), int(starts["7d"]),
+            LOG_TYPE_ERROR, int(starts["7d"]),
+            LOG_TYPE_ERROR, int(starts["30d"]),
+            *params, MODEL_USAGE_MAX_ACCOUNTS + 1,
+        ),
+        MODEL_USAGE_MAX_ACCOUNTS,
+    )
     daily_rows = _sqlite_aggregate(
         db_path,
         "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime') AS day, "
@@ -437,7 +475,26 @@ def _load_usage_aggregates_sqlite(db_path, starts, end):
         (*params, MODEL_USAGE_MAX_DAILY + 1),
         MODEL_USAGE_MAX_DAILY,
     )
+    hourly_end = datetime.datetime.fromtimestamp(int(end), datetime.timezone.utc).astimezone()
+    hourly_start = hourly_end.replace(minute=0, second=0, microsecond=0) - datetime.timedelta(
+        hours=MODEL_USAGE_HOURLY_WINDOW - 1
+    )
+    hourly_rows = _sqlite_aggregate(
+        db_path,
+        "SELECT strftime('%Y-%m-%dT%H:00:00', created_at, 'unixepoch', 'localtime') AS hour_start, "
+        "CAST(strftime('%H', created_at, 'unixepoch', 'localtime') AS INTEGER) AS hour, "
+        "model_name, COUNT(*), COALESCE(SUM(prompt_tokens + completion_tokens), 0), "
+        "COALESCE(SUM(quota), 0) FROM logs WHERE " + base_filter +
+        " AND created_at >= ? AND created_at < ? GROUP BY hour_start, hour, model_name "
+        "ORDER BY hour_start ASC, model_name ASC LIMIT ?",
+        (
+            int(hourly_start.timestamp()), int(end), LOG_TYPE_CONSUME, LOG_TYPE_ERROR,
+            int(hourly_start.timestamp()), int(end), MODEL_USAGE_MAX_HOURLY + 1,
+        ),
+        MODEL_USAGE_MAX_HOURLY,
+    )
     windows = {key: [] for key, _ in MODEL_USAGE_WINDOWS}
+    account_windows = {key: [] for key, _ in MODEL_USAGE_WINDOWS}
     for row in model_rows:
         name = str(row[0]).strip()
         values = {
@@ -454,29 +511,57 @@ def _load_usage_aggregates_sqlite(db_path, starts, end):
                 "errors": int(row[6 if key == "1d" else 14 if key == "7d" else 15] or 0),
                 "avg_use_time": round(use_time_sum / requests, 3),
             })
+    for row in account_rows:
+        raw_id = str(row[0] or "").strip()
+        raw_name = str(row[1] or "").strip()
+        account_id = raw_id or raw_name or "unknown"
+        account_name = raw_name or "未知账号"
+        values = {
+            "1d": (int(row[2] or 0), int(row[8] or 0), int(row[9] or 0)),
+            "7d": (int(row[3] or 0), int(row[10] or 0), int(row[11] or 0)),
+            "30d": (int(row[4] or 0), int(row[5] or 0), int(row[6] or 0)),
+        }
+        for key, (requests, tokens, quota) in values.items():
+            if requests <= 0:
+                continue
+            account_windows[key].append({
+                "account_id": account_id, "account_name": account_name,
+                "requests": requests, "tokens": tokens,
+                "quota": quota / 500000.0, "quota_raw": quota,
+                "errors": int(row[7 if key == "1d" else 12 if key == "7d" else 13] or 0),
+            })
     daily = [{
         "date": str(row[0]), "model": str(row[1]).strip(), "requests": int(row[2] or 0),
         "tokens": int(row[3] or 0), "quota": int(row[4] or 0) / 500000.0,
         "quota_raw": int(row[4] or 0),
     } for row in daily_rows]
-    return windows, daily
+    hourly = [{
+        "hour_start": str(row[0]), "date": str(row[0])[:10], "hour": int(row[1]),
+        "model": str(row[2]).strip(),
+        "requests": int(row[3] or 0), "tokens": int(row[4] or 0),
+        "quota": int(row[5] or 0) / 500000.0, "quota_raw": int(row[5] or 0),
+    } for row in hourly_rows]
+    return windows, account_windows, daily, hourly
 
 
 def _build_model_usage(now=None):
     now = now or datetime.datetime.now().astimezone()
     starts = _usage_window_starts(now)
     window_meta = _usage_window_meta(starts, now)
-    windows, daily = _load_usage_aggregates_sqlite(
+    windows, account_windows, daily, hourly = _load_usage_aggregates_sqlite(
         MODEL_USAGE_DB, starts, window_meta["30d"]["end"]
     )
     for models in windows.values():
         models.sort(key=lambda item: (-item["requests"], item["model"]))
+    for accounts in account_windows.values():
+        accounts.sort(key=lambda item: (-item["requests"], item["account_name"]))
     return {
         "windows": {
-            key: {**window_meta[key], "models": windows[key]}
+            key: {**window_meta[key], "models": windows[key], "accounts": account_windows[key]}
             for key, _ in MODEL_USAGE_WINDOWS
         },
         "daily": daily,
+        "hourly": hourly,
         "generated_at": now.isoformat(),
         "source": "sqlite",
         "stale": False,
@@ -484,7 +569,9 @@ def _build_model_usage(now=None):
             "complete": True,
             "rows": sum(item["requests"] for item in windows["30d"]),
             "model_limit": MODEL_USAGE_MAX_MODELS,
+            "account_limit": MODEL_USAGE_MAX_ACCOUNTS,
             "daily_limit": MODEL_USAGE_MAX_DAILY,
+            "hourly_limit": MODEL_USAGE_MAX_HOURLY,
             "start": starts["30d"],
             "end": window_meta["30d"]["end"],
             "timezone": str(now.tzinfo),
@@ -502,9 +589,17 @@ def _load_usage_snapshot_disk():
         raw = json.loads(MODEL_USAGE_SNAPSHOT_FILE.read_text(encoding="utf-8"))
         if not isinstance(raw, dict) or not isinstance(raw.get("snapshot"), dict):
             raise ValueError("快照格式无效")
+        snapshot = raw["snapshot"]
+        windows = snapshot.get("windows")
+        if not isinstance(windows, dict) or any(
+            not isinstance(windows.get(key), dict) or not isinstance(windows[key].get("accounts"), list)
+            for key, _ in MODEL_USAGE_WINDOWS
+        ):
+            # 旧版快照没有 accounts；不能把它当作新鲜数据，否则升级后 5 分钟内会显示空账号。
+            return None, 0.0
         saved_at = float(raw.get("saved_at") or 0)
         wall_age = max(0.0, time.time() - float(raw.get("saved_wall_at") or 0))
-        return raw["snapshot"], time.monotonic() - wall_age
+        return snapshot, time.monotonic() - wall_age
     except FileNotFoundError:
         return None, 0.0
     except Exception as exc:
@@ -1155,6 +1250,25 @@ def balance_snapshot():
         _wb.apply_runtime_overrides(data)
     except Exception:
         pass
+    # Qoder 账号卡：只读取只读账号目录的白名单字段；目录缺失、权限或
+    # 单个损坏文件都不能影响余额快照本身。
+    try:
+        from collectors import qoder_status as _qoder
+        pools = _qoder.collect_many()
+        qoder = next((pool for pool in pools if pool.get("id") == "default"), pools[0])
+        data["qoder"] = {
+            "accounts": qoder.get("accounts", []),
+            "summary": qoder.get("summary", {}),
+        }
+        data["qoder_error"] = qoder.get("error")
+        data["qoder_pools"] = pools
+    except Exception as exc:
+        data["qoder"] = {"accounts": [], "summary": {
+            "total": 0, "healthy": 0, "disabled": 0, "cooldown": 0,
+            "remaining_credits": None,
+        }}
+        data["qoder_error"] = "Qoder 账号读取失败：%s" % (str(exc)[:120] or exc.__class__.__name__)
+        data["qoder_pools"] = []
     return data
 
 

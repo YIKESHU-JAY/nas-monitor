@@ -128,6 +128,44 @@ class OverviewCacheTests(unittest.TestCase):
             build.assert_not_called()
 
 
+class RouterHttpsFallbackTests(unittest.TestCase):
+    def test_force_https_router_falls_back_after_http_login_failure(self):
+        calls = []
+
+        def login(base, _context):
+            calls.append(base)
+            if base.startswith("http://"):
+                raise OSError("HTTP Error 401: Unauthorized")
+            return "session=test"
+
+        with patch.object(api_server, "ROUTER_HOST", "router.local"), \
+                patch.object(api_server, "IKUAI_PASS", "test-password"), \
+                patch.object(api_server, "ROUTER_BASE", "http://router.local"), \
+                patch.object(api_server, "ROUTER_HTTPS_BASE", "https://router.local"), \
+                patch.object(api_server, "_router_cache", {"ts": 0.0, "data": None}), \
+                patch.object(api_server, "_router_login", side_effect=login), \
+                patch.object(api_server, "_apply_openwrt_rates"), \
+                patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = b'{"Result": 30000, "Data": {}}'
+            result = api_server.get_router_status()
+
+        self.assertEqual(["http://router.local", "https://router.local"], calls)
+        self.assertEqual("up", result["status"])
+
+    def test_force_https_router_reports_both_login_errors(self):
+        with patch.object(api_server, "ROUTER_HOST", "router.local"), \
+                patch.object(api_server, "IKUAI_PASS", "test-password"), \
+                patch.object(api_server, "ROUTER_BASE", "http://router.local"), \
+                patch.object(api_server, "ROUTER_HTTPS_BASE", "https://router.local"), \
+                patch.object(api_server, "_router_cache", {"ts": 0.0, "data": None}), \
+                patch.object(api_server, "_router_login", side_effect=OSError("login rejected")):
+            result = api_server.get_router_status()
+
+        self.assertEqual("down", result["status"])
+        self.assertIn("http://router.local", result["error"])
+        self.assertIn("https://router.local", result["error"])
+
+
 class AppSetupQrTests(unittest.TestCase):
     """App 扫码导入：地址推断与 payload 组装（不依赖 qrcode 可选依赖）。"""
 

@@ -6,7 +6,7 @@
 
 ## 当前版本
 
-当前文档版本为 **v238.2**。Android 应用版本保持 **238 / 238.0**；本次补丁恢复 README 中的作者自用声明，不修改业务源码、APK 或截图素材。
+当前文档版本为 **v252**，Android 应用版本为 **252 / 252.0**。本次源码发布覆盖 v238.2 之后已验收的后端、Web 和 Android 功能。
 
 主要能力：
 
@@ -15,6 +15,7 @@
 - 1 天、7 天、30 天模型用量：请求数、Token、环形分布和双序列趋势。
 - qBittorrent、Transmission 下载器，以及 Mihomo、机场看板和代理设置。
 - WorkBuddy 多出口账号池、动态远程服务器和可选工具入口。
+- Qoder 主账号池与 B 账号池状态卡，以及账号级模型用量统计。
 
 版本变化见 [更新记录](CHANGELOG.md)。
 
@@ -32,7 +33,7 @@
 | --- | --- |
 | ![Web 桌面用量页](docs/screenshots/15-用量页-Web桌面-30天.png) | ![Web 移动端用量页](docs/screenshots/16-用量页-Web移动端-30天.png) |
 
-截图保持 v238 已授权素材的原始画面和尺寸，仅清除图片元数据；本轮没有新增视觉授权。
+本轮截图使用用户已核对、无敏感信息的用量页面素材：Android 30 天、Android 30 天趋势、Web 桌面 30 天和 Web 移动端 30 天。截图按原画面复制到 `docs/screenshots/`，仅清理 EXIF/IPTC/XMP 元数据，不重绘、不遮挡用户已确认可展示的内容；该展示授权仅限本轮，不形成永久豁免。
 
 ## 功能截图
 
@@ -90,6 +91,8 @@ docker compose -f docker-compose.example.yml exec -T nas-monitor-api python3 -c 
 ```
 
 浏览器访问用户选择的入口，使用 `WEB_API_TOKEN` 或 `APP_API_TOKEN` 登录，确认总览显示真实 Glances 指标。静态页匿名加载；数据接口需要 Bearer Token。业务端口为 8765，免鉴权健康探针仅容器 loopback 8766。
+
+用量页需要把 New API 数据目录只读挂载到容器 `/new-api-data`。在 `.env` 设置 `NEW_API_DATA_DIR` 为实际目录，模板会使用 `/new-api-data/new-api.db`；不要填写单个数据库文件路径，也不要把数据库挂成可写。
 
 若 Glances 在另一个容器，`127.0.0.1` 在 monitor 容器内只代表 monitor 自身；使用核实过的宿主 LAN 地址或共享 Docker 网络服务名。没有采集器时由用户决定是否新建，不得伪造指标。
 

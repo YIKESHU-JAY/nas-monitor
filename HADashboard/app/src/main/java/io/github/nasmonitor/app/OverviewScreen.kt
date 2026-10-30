@@ -258,6 +258,9 @@ private fun compactRate(rate: String): String {
 internal fun airportUsedProgress(usedPercent: Double): Float = (usedPercent.coerceAtLeast(0.0) / 100.0).toFloat().coerceIn(0f, 1f)
 internal fun airportRemainingPercent(usedPercent: Double): Double = (100.0 - usedPercent.coerceAtLeast(0.0)).coerceIn(0.0, 100.0)
 
+/** Ordinary alert cards are translucent; elevation would tint their surface. */
+internal val ALERT_CARD_ELEVATION = 0.dp
+
 @Composable
 fun CoreServicesRow(services: Map<String, ServiceStatus>, expanded: Boolean, onToggle: () -> Unit) {
     val online = services.count { it.value.status == "up" }
@@ -525,7 +528,7 @@ private fun OverviewStatusSummary(overview: OverviewResponse) {
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.weight(1f))
-                Surface(shape = RoundedCornerShape(8.dp), color = CardWhite.copy(alpha = 0.72f)) {
+                Surface(shape = RoundedCornerShape(8.dp), color = InnerSurface) {
                     Text(attention, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = ink, modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp))
                 }
             }
@@ -1125,7 +1128,7 @@ fun AlertsScreen(navController: NavHostController) {
                             Text("待处理", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Ink)
                             Text("按严重度与首次出现时间排序", fontSize = 11.sp, color = Muted)
                         }
-                        Surface(shape = RoundedCornerShape(8.dp), color = CardWhite.copy(alpha = 0.72f)) {
+                        Surface(shape = RoundedCornerShape(8.dp), color = InnerSurface) {
                             Text("${alerts.size} 项", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (criticalCount > 0) StatusCriticalInk else StatusAttentionInk, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
                         }
                     }
@@ -1161,7 +1164,11 @@ fun AlertsScreen(navController: NavHostController) {
             }
             alerts.forEach { alert -> item {
                 val critical = alert.level == "critical"
-                LiquidAwareCard(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(CardWhite), elevation = MonitorCardElevation(1.dp)) {
+                LiquidAwareCard(
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(CardWhite),
+                    elevation = CardDefaults.cardElevation(defaultElevation = ALERT_CARD_ELEVATION)
+                ) {
                     Column(Modifier.padding(16.dp)) {
                         Column(Modifier.fillMaxWidth()) {
                             Row(verticalAlignment = Alignment.CenterVertically) {

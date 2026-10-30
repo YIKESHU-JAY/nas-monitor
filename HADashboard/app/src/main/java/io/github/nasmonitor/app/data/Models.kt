@@ -485,6 +485,13 @@ data class NewApiUsageModel(
     val errors: Long = 0,
     @SerializedName("avg_use_time") val avgUseTime: Double = 0.0
 )
+data class NewApiUsageAccount(
+    @SerializedName("account_id") val accountId: String = "",
+    @SerializedName("account_name") val accountName: String = "",
+    val requests: Long = 0,
+    val tokens: Long = 0,
+    val errors: Long = 0
+)
 data class NewApiUsageWindow(
     val label: String = "",
     val days: Int = 0,
@@ -492,10 +499,19 @@ data class NewApiUsageWindow(
     val end: Long = 0,
     @SerializedName("start_date") val startDate: String = "",
     @SerializedName("end_date") val endDate: String = "",
-    val models: List<NewApiUsageModel> = emptyList()
+    val models: List<NewApiUsageModel> = emptyList(),
+    val accounts: List<NewApiUsageAccount> = emptyList()
 )
 data class NewApiUsageDaily(
     val date: String = "",
+    val model: String = "",
+    val requests: Long = 0,
+    val tokens: Long = 0
+)
+data class NewApiUsageHourly(
+    @SerializedName("hour_start") val hourStart: String = "",
+    val date: String = "",
+    val hour: Int = 0,
     val model: String = "",
     val requests: Long = 0,
     val tokens: Long = 0
@@ -512,6 +528,7 @@ data class NewApiUsageCoverage(
 data class NewApiModelUsage(
     val windows: Map<String, NewApiUsageWindow> = emptyMap(),
     val daily: List<NewApiUsageDaily> = emptyList(),
+    val hourly: List<NewApiUsageHourly> = emptyList(),
     @SerializedName("generated_at") val generatedAt: String = "",
     val source: String = "",
     val stale: Boolean = false,
@@ -601,7 +618,50 @@ data class NewApiBalance(
     val channels: List<NewApiBalanceChannel> = emptyList(),
     val total: Double = 0.0,
     val workbuddy: WorkBuddyPool? = null,
-    @SerializedName("workbuddy_error") val workbuddyError: String? = null
+    @SerializedName("workbuddy_error") val workbuddyError: String? = null,
+    val qoder: QoderPool? = null,
+    @SerializedName("qoder_error") val qoderError: String? = null,
+    @SerializedName("qoder_pools") val qoderPools: List<QoderPool> = emptyList()
+)
+
+data class QoderCredits(
+    val remain: Double? = null,
+    val used: Double? = null,
+    val size: Double? = null,
+    @SerializedName("updated_iso") val updatedIso: String? = null
+)
+
+data class QoderAccount(
+    val uid: String = "",
+    val nickname: String = "",
+    val realm: String? = null,
+    val domain: String? = null,
+    val platform: String? = null,
+    val plan: String? = null,
+    val enabled: Boolean? = null,
+    val credits: QoderCredits = QoderCredits(),
+    @SerializedName("cooldownUntil") val cooldownUntil: String? = null,
+    @SerializedName("lastError") val lastError: String? = null,
+    @SerializedName("lastCheckin") val lastCheckin: String? = null,
+    @SerializedName("expiresAt") val expiresAt: String? = null,
+    @SerializedName("addedAt") val addedAt: String? = null,
+    val status: String = "healthy"
+)
+
+data class QoderSummary(
+    val total: Int = 0,
+    val healthy: Int = 0,
+    val disabled: Int = 0,
+    val cooldown: Int = 0,
+    @SerializedName("remaining_credits") val remainingCredits: Double? = null
+)
+
+data class QoderPool(
+    val id: String = "default",
+    val label: String = "主实例",
+    val accounts: List<QoderAccount> = emptyList(),
+    val summary: QoderSummary = QoderSummary(),
+    val error: String? = null
 )
 
 // Pipio 日报详情（点击余额卡中的 pipio / pipio2 后读取）
@@ -652,6 +712,7 @@ data class WorkBuddyAccount(
     @SerializedName("breaker_fails") val breakerFails: Int? = null,
     @SerializedName("month_used") val monthUsed: Int? = null,
     @SerializedName("today_used") val todayUsed: Int? = null,
+    @SerializedName("today_used_valid") val todayUsedValid: Boolean = false,
     @SerializedName("group_id") val groupId: String = "",
     @SerializedName("recent_requests") val recentRequests: Int? = null,
     @SerializedName("recent_last_ts") val recentLastTs: String? = null

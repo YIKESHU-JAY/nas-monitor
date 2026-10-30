@@ -113,23 +113,64 @@ def _today_key():
     return datetime.now(SHANGHAI).strftime("%Y-%m-%d")
 
 
-def _today_used(used_now, channel_name):
-    """今日消耗 = 当前累计值 - 今日基线累计值；wb 月累计月初归零，回退视为周期重置。"""
+def _today_used(used_now, channel_name, now=None):
+    """今日消耗 = 当前累计已用积分 - 当天首次采样基线。
+
+    used_now 是 billing 的累计已用积分，不是余额。累计值回落通常说明计费
+    周期发生重置，此时旧基线已失效，不能把重置后的累计值冒充今日消耗；
+    应先重建基线并等待下一次采样。
+    """
     if used_now is None:
-        return None
-    today = _today_key()
+        return None, False
+    now_local = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+    today = now_local.date().isoformat()
     base = _load_shadow_json("balance_baseline.json")
     base = {k: v for k, v in base.items() if k == today}
     today_base = base.get(today, {})
     prev = today_base.get(channel_name)
     if prev is None:
-        today_base[channel_name] = used_now
+        today_base[channel_name] = {
+            "used": used_now,
+            "captured_at": now_local.isoformat(timespec="seconds"),
+        }
         base[today] = today_base
         _save_shadow_json("balance_baseline.json", base)
-        return None
-    if used_now < prev:
-        return used_now
-    return used_now - prev
+        return None, False
+    if isinstance(prev, dict):
+        prev_used = prev.get("used")
+        captured_at = prev.get("captured_at")
+    else:
+        # 旧版基线没有采样时间，无法确认是否来自零点；保留兼容读取，
+        # 但只有非零差值才可作为今日消耗。
+        prev_used = prev
+        captured_at = None
+    if not isinstance(prev_used, (int, float)) or isinstance(prev_used, bool):
+        today_base[channel_name] = {
+            "used": used_now,
+            "captured_at": now_local.isoformat(timespec="seconds"),
+        }
+        base[today] = today_base
+        _save_shadow_json("balance_baseline.json", base)
+        return None, False
+    if captured_at is None:
+        # 旧版只保存数值，没有采样时间；下一次采集时升级为可审计格式。
+        # 本轮仍沿用旧值计算，避免丢失当天已经发生的增量。
+        today_base[channel_name] = {
+            "used": prev_used,
+            "captured_at": now_local.isoformat(timespec="seconds"),
+        }
+        base[today] = today_base
+        _save_shadow_json("balance_baseline.json", base)
+    if used_now < prev_used:
+        today_base[channel_name] = {
+            "used": used_now,
+            "captured_at": now_local.isoformat(timespec="seconds"),
+        }
+        base[today] = today_base
+        _save_shadow_json("balance_baseline.json", base)
+        return None, False
+    delta = used_now - prev_used
+    return delta, captured_at is not None or delta > 0
 
 
 def cap_baseline_credit(account, credit_map):
@@ -174,15 +215,23 @@ def _roll_cap_shadow(workbuddy, now_local, source, effective_date=None, merge_mi
     existing = data.get(day)
     if isinstance(existing, dict) and not merge_missing:
         return 0
+    values = {
+        uid: value for uid, value in values.items()
+        if int(value.get("credits") or 0) > 0
+    }
     if isinstance(existing, dict) and merge_missing:
         old_values = existing.get("values") if isinstance(existing.get("values"), dict) else {}
+        # A newly added account without a trustworthy positive credit must not
+        # persist 0 as its daily baseline. Leave it pending and retry next run.
+        values = {
+            uid: value for uid, value in values.items()
+            if uid in old_values or int(value.get("credits") or 0) > 0
+        }
         missing = {uid: value for uid, value in values.items() if uid not in old_values}
-        # 修正历史误写的 0 基线。两类账号的 0 都不是真实额度，拿到正数就该覆盖，
-        # 否则 App 端分母一直是 0（表现为「积分 0 / 0」）：
-        #   · 国际版：上游 /status 的 credits 恒为 0，0 只代表「上游无此口径」；
-        #   · 走了权威兜底的账号（面板代查 / billing）：上游本地额度尚未同步时为 0，
-        #     例如 wan3 的账号目录不在本机、上游实例本地 credits 一直是 0。
-        # 只覆盖「有权威正数」的情形，CN 账号当日额度用尽的 0 不受影响。
+        # 修正历史误写的 0 基线。0 在部分来源里表示「上游尚未同步/查不到」，
+        # 不是真实额度；当前账号已有有效正积分时，应以当前积分为准修复，
+        # 否则 App 端分母一直是 0（表现为「积分 0 / 0」）。
+        # 只覆盖当前正数，CN 账号当日额度真实为 0 时仍保持 0。
         repaired = {}
         authoritative_uids = set()
         for a in (workbuddy or {}).get("accounts") or []:
@@ -193,12 +242,24 @@ def _roll_cap_shadow(workbuddy, now_local, source, effective_date=None, merge_mi
         global_uids = {str(a.get("uid") or "") for a in (workbuddy or {}).get("accounts") or []
                        if str(a.get("realm") or "").strip().lower() == "global"}
         for uid, value in values.items():
-            if uid not in global_uids and uid not in authoritative_uids:
-                continue
             old = old_values.get(uid)
             old_credits = old.get("credits") if isinstance(old, dict) else old
-            if uid in old_values and isinstance(old_credits, (int, float)) and not isinstance(old_credits, bool) \
-                    and int(old_credits) == 0 and int(value.get("credits") or 0) > 0:
+            current = next(
+                (a for a in (workbuddy or {}).get("accounts") or []
+                 if str(a.get("uid") or "") == uid),
+                None,
+            )
+            current_credits = current.get("credits") if isinstance(current, dict) else None
+            current_positive = (
+                _valid_credit(current_credits)
+                and int(current_credits) > 0
+            )
+            if uid in old_values and isinstance(old_credits, (int, float)) \
+                    and not isinstance(old_credits, bool) and int(old_credits) == 0 \
+                    and int(value.get("credits") or 0) > 0 \
+                    and (uid in global_uids or uid in authoritative_uids or current_positive):
+                value = dict(value)
+                value["repaired_from_zero"] = True
                 repaired[uid] = value
         if not missing and not repaired:
             return 0
@@ -229,6 +290,7 @@ def _apply_wb_daily_cap(workbuddy, now_local):
     if not isinstance(values, dict):
         values = {}
     captured_at = local_now.isoformat(timespec="seconds")
+    repairs = {}
     for entry in (workbuddy or {}).get("accounts") or []:
         uid = str(entry.get("uid") or "")
         raw_value = values.get(uid)
@@ -236,25 +298,70 @@ def _apply_wb_daily_cap(workbuddy, now_local):
             base_value = raw_value.get("credits")
             raw_source = raw_value.get("source") or record.get("source")
             raw_captured_at = raw_value.get("captured_at")
+            repaired_from_zero = bool(raw_value.get("repaired_from_zero"))
         else:
             base_value = raw_value
             raw_source = record.get("source") if isinstance(record, dict) else None
             raw_captured_at = record.get("captured_at") if isinstance(record, dict) else None
+            repaired_from_zero = False
         is_global = str(entry.get("realm") or "").strip().lower() == "global"
-        if uid in values and _valid_credit(base_value) and not (is_global and int(base_value) <= 0):
+        repaired_now = repaired_from_zero
+        current_credit = entry.get("credits")
+        current_positive = _valid_credit(current_credit) and int(current_credit) > 0
+        pending_zero = (
+            entry.get("group_id") == "wan3"
+            and uid in values
+            and _valid_credit(base_value)
+            and int(base_value) == 0
+            and not current_positive
+        )
+        if pending_zero:
+            entry["daily_cap"] = None
+            entry["daily_cap_source"] = "awaiting_credit"
+            entry["daily_cap_effective_date"] = None
+            entry["daily_cap_captured_at"] = captured_at
+            entry["daily_cap_timezone"] = "Asia/Shanghai"
+            entry["daily_cap_record_source"] = "awaiting_credit"
+        elif uid in values and _valid_credit(base_value) and not (is_global and int(base_value) <= 0):
+            current = entry.get("credits")
+            if (int(base_value) == 0 and _valid_credit(current)
+                    and int(current) > 0):
+                base_value = int(current)
+                raw_source = "repair_current_credit"
+                repaired_now = True
+            if repaired_now:
+                raw_source = "repair_current_credit"
+                repairs[uid] = {
+                    "credits": int(base_value),
+                    "captured_at": raw_captured_at or captured_at,
+                    "source": "repair_current_credit",
+                }
             entry["daily_cap"] = int(base_value)
-            entry["daily_cap_source"] = "lazy" if raw_source == "lazy" else "baseline"
+            entry["daily_cap_source"] = (
+                "repair_current_credit"
+                if repaired_now or raw_source == "repair_current_credit"
+                else "lazy" if raw_source == "lazy" else "baseline"
+            )
             entry["daily_cap_effective_date"] = today
             entry["daily_cap_captured_at"] = raw_captured_at
             entry["daily_cap_timezone"] = record.get("timezone", "Asia/Shanghai")
             entry["daily_cap_record_source"] = raw_source
-        elif _valid_credit(entry.get("credits")) and not (is_global and int(entry["credits"]) <= 0):
+        elif (_valid_credit(entry.get("credits"))
+              and not (is_global and int(entry["credits"]) <= 0)
+              and not (entry.get("group_id") == "wan3" and int(entry["credits"]) == 0)):
             entry["daily_cap"] = int(entry["credits"])
             entry["daily_cap_source"] = "seed"
             entry["daily_cap_effective_date"] = None
             entry["daily_cap_captured_at"] = captured_at
             entry["daily_cap_timezone"] = "Asia/Shanghai"
             entry["daily_cap_record_source"] = "seed_current_uid"
+        elif entry.get("group_id") == "wan3" and int(entry.get("credits") or 0) <= 0:
+            entry["daily_cap"] = None
+            entry["daily_cap_source"] = "awaiting_credit"
+            entry["daily_cap_effective_date"] = None
+            entry["daily_cap_captured_at"] = captured_at
+            entry["daily_cap_timezone"] = "Asia/Shanghai"
+            entry["daily_cap_record_source"] = "awaiting_credit"
         else:
             entry["daily_cap"] = None
             entry["daily_cap_source"] = None
@@ -262,6 +369,15 @@ def _apply_wb_daily_cap(workbuddy, now_local):
             entry["daily_cap_captured_at"] = None
             entry["daily_cap_timezone"] = "Asia/Shanghai"
             entry["daily_cap_record_source"] = None
+    if repairs and isinstance(record, dict):
+        record["values"] = {**values, **repairs}
+        data[today] = record
+        try:
+            atomic_write_snapshot("workbuddy_credit_cap.json", data,
+                                  production_relative="workbuddy_credit_cap.json",
+                                  switch="NAS_MONITOR_CUTOVER_BALANCE")
+        except Exception:
+            pass
     return workbuddy
 
 
@@ -301,8 +417,17 @@ def _workbuddy_state_fallback(uids):
 # 启动。因此改为**只走 HTTP**：账号清单仍取上游 /status（上游自己热加载
 # auths，5s 一轮），实时积分取面板代查腾讯的结果。
 _PANEL_CREDIT_CACHE = {"ts": 0.0, "value": None}
+_PANEL_TODAY_CACHE = {"ts": 0.0, "value": None}
 _PANEL_WATCH_INTERVAL = float(os.environ.get("WORKBUDDY_PANEL_WATCH_INTERVAL", "60"))
 _panel_watch_state = {"ts": 0.0, "fingerprint": None}
+_PANEL_LOG_PAGE_SIZE = 200
+_PANEL_LOG_MAX_PAGES = 100
+
+
+class _PanelTodayCredits:
+    def __init__(self, totals, complete):
+        self.totals = totals
+        self.complete = complete
 
 
 def _panel_json(path, token, timeout=25, data=None):
@@ -351,6 +476,158 @@ def _panel_wan3_credits_cached():
         _PANEL_CREDIT_CACHE["ts"] = now
         _PANEL_CREDIT_CACHE["value"] = value
     return value
+
+
+def _panel_wan3_credits_fresh():
+    """Fetch panel credits for a collection run and refresh the shared cache."""
+    value = _panel_wan3_credits()
+    if value:
+        import time as _time
+        _PANEL_CREDIT_CACHE.update(ts=_time.time(), value=value)
+    return value
+
+
+def _panel_wan3_today_credits():
+    """从 wan3 面板读取今日真实扣费（usage_daily.credit 合计）。
+
+    面板的统计接口直接聚合上游每次请求返回的 usage.credit，比余额差值更准确。
+    接口失败或结构异常返回 None，调用方不得用余额差猜测今日消耗。
+    """
+    if not (WORKBUDDY_WAN3_PANEL and WORKBUDDY_WAN3_PANEL_TOKEN):
+        return None
+    try:
+        payload = _panel_json("/api/stats/summary", WORKBUDDY_WAN3_PANEL_TOKEN, timeout=10)
+    except Exception:
+        return None
+    value = payload.get("today_credit") if isinstance(payload, dict) else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return int(round(float(value)))
+    return None
+
+
+def _panel_wan3_today_credits_cached():
+    import time as _time
+    now = _time.time()
+    if (_PANEL_TODAY_CACHE["value"] is not None
+            and now - _PANEL_TODAY_CACHE["ts"] < _CREDIT_CACHE_TTL):
+        return _PANEL_TODAY_CACHE["value"]
+    value = _panel_wan3_today_credits()
+    if value is not None:
+        _PANEL_TODAY_CACHE["ts"] = now
+        _PANEL_TODAY_CACHE["value"] = value
+    return value
+
+
+def _account_uid_from_panel(value):
+    """Extract the stable uid suffix from panel's ``nickname(uid8)`` label."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.endswith(")") and "(" in text:
+        return text.rsplit("(", 1)[1][:-1].strip()
+    return text
+
+
+def _panel_wan3_today_credits_by_account():
+    """Aggregate today's credit from panel request logs by account uid.
+
+    The panel summary endpoint exposes only a pool-wide total. Its request log
+    rows include the account label and the exact per-request credit, so those
+    rows are the account-level source. Unattributed rows are deliberately not
+    spread across accounts.
+    """
+    return _panel_wan3_today_credits_snapshot().totals
+
+
+def _panel_wan3_today_credits_snapshot():
+    if not (WORKBUDDY_WAN3_PANEL and WORKBUDDY_WAN3_PANEL_TOKEN):
+        return _PanelTodayCredits({}, False)
+    totals = {}
+    total_rows = None
+    rows_read = 0
+    page = 1
+    while page <= _PANEL_LOG_MAX_PAGES:
+        try:
+            payload = _panel_json(
+                "/api/logs?today=1&page=%d&size=%d" % (page, _PANEL_LOG_PAGE_SIZE),
+                WORKBUDDY_WAN3_PANEL_TOKEN,
+                timeout=15,
+            )
+        except Exception:
+            return _PanelTodayCredits({}, False)
+        if not isinstance(payload, dict):
+            return _PanelTodayCredits({}, False)
+        rows = payload.get("items")
+        if not isinstance(rows, list):
+            return _PanelTodayCredits({}, False)
+        try:
+            total_rows = max(0, int(payload.get("total") or 0))
+        except (TypeError, ValueError):
+            return _PanelTodayCredits({}, False)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            uid = _account_uid_from_panel(row.get("account"))
+            credit = row.get("credit")
+            if not uid or isinstance(credit, bool) or not isinstance(credit, (int, float)):
+                continue
+            if credit < 0:
+                continue
+            totals[uid] = totals.get(uid, 0.0) + float(credit)
+        rows_read += len(rows)
+        if rows_read >= total_rows:
+            return _PanelTodayCredits(totals, True)
+        if len(rows) < _PANEL_LOG_PAGE_SIZE:
+            return _PanelTodayCredits({}, False)
+        page += 1
+    return _PanelTodayCredits({}, False)
+
+
+def _panel_wan3_today_credits_for_uid(uid):
+    snapshot = _panel_wan3_today_credits_snapshot()
+    if not snapshot.complete:
+        return None, False
+    value = _panel_today_credit_for_uid(snapshot.totals, uid)
+    return (0 if value is None else int(round(value))), True
+
+
+def _panel_wan3_today_credits_by_account_cached():
+    import time as _time
+    now = _time.time()
+    if (_PANEL_TODAY_CACHE["value"] is not None
+            and now - _PANEL_TODAY_CACHE["ts"] < _CREDIT_CACHE_TTL):
+        return _PANEL_TODAY_CACHE["value"]
+    value = _panel_wan3_today_credits_by_account()
+    if value:
+        _PANEL_TODAY_CACHE["ts"] = now
+        _PANEL_TODAY_CACHE["value"] = value
+    return value
+
+
+def _panel_today_credit_for_uid(totals, uid):
+    """Match panel's 8-character uid to NAS Monitor's full uid."""
+    uid = str(uid or "")
+    if not uid:
+        return None
+    matches = [
+        key for key in (totals or {})
+        if key and (uid == key or (uid.startswith(key) and len(key) >= 8))
+    ]
+    return (totals or {}).get(matches[0]) if len(matches) == 1 else None
+
+
+def _panel_today_credit_for_snapshot(snapshot, uid):
+    if not isinstance(snapshot, _PanelTodayCredits) or not snapshot.complete:
+        return None, False
+    value = _panel_today_credit_for_uid(snapshot.totals, uid)
+    return (0 if value is None else int(round(value))), True
+
+
+def _invalidate_panel_credit_caches():
+    _PANEL_CREDIT_CACHE["ts"] = 0.0
+    _PANEL_CREDIT_CACHE["value"] = None
+    _PANEL_TODAY_CACHE["ts"] = 0.0
+    _PANEL_TODAY_CACHE["value"] = None
 
 
 def _panel_accounts_fingerprint():
@@ -540,7 +817,10 @@ def collect():
         accounts_raw = payload.get("accounts") or []
         credit_map, credit_err = _workbuddy_credit_cached()
         # wan3 的账号目录不在本机：实时积分改由面板代查（见 _panel_wan3_credits）。
-        panel_credits = _panel_wan3_credits_cached() if group["id"] == "wan3" else {}
+        panel_credits = _panel_wan3_credits_fresh() if group["id"] == "wan3" else {}
+        panel_today_credits = (
+            _panel_wan3_today_credits_snapshot() if group["id"] == "wan3" else None
+        )
         state_fallback = None
         if not credit_map:
             state_fallback = _workbuddy_state_fallback([a.get("uid") for a in accounts_raw if isinstance(a, dict)])
@@ -567,7 +847,11 @@ def collect():
             }
             if credit_map and uid in credit_map:
                 entry["month_used"] = credit_map[uid]["used"]
-                entry["today_used"] = _today_used(credit_map[uid]["used"], "wb:" + uid)
+                today_used, today_valid = _today_used(
+                    credit_map[uid]["used"], "wb:" + uid
+                )
+                entry["today_used"] = today_used
+                entry["today_used_valid"] = today_valid
                 # 上游 /status 对新账号可能返回 0（实例本地额度尚未同步），
                 # 用 billing 的剩余额度兜底，避免前端显示 0 / 0。
                 remain = credit_map[uid].get("remain")
@@ -582,6 +866,12 @@ def collect():
             if not entry.get("credits") and uid in panel_credits:
                 entry["credits"] = panel_credits[uid]
                 entry["credit_source"] = "panel_credits"
+            if panel_today_credits is not None:
+                today_credit, today_valid = _panel_today_credit_for_snapshot(
+                    panel_today_credits, uid)
+                entry["today_used"] = today_credit
+                entry["today_used_valid"] = today_valid
+                entry["today_used_source"] = "panel_usage_credit"
             norm.append(entry)
         norm.sort(key=lambda x: (x["disabled"], x["cooling"],
                                  -(x["credits"] if isinstance(x["credits"], (int, float)) else -1)))
@@ -882,6 +1172,7 @@ def refresh_on_account_change():
             if now < _account_watch_state["not_before"]:
                 return False
             _account_watch_state["not_before"] = now + _ACCOUNT_WATCH_MIN_GAP
+            _invalidate_panel_credit_caches()
         collect()
         _refresh_combined_snapshot()
         return True

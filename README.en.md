@@ -6,7 +6,7 @@ A self-hosted dashboard for NAS and AI gateway monitoring, with an Android app a
 
 ## Current Version
 
-This documentation release is **v238.2**. The Android app remains at **238 / 238.0**; this patch restores the author's personal-use note in the README. It does not change business source, the APK, or screenshot assets.
+This source release is **v252**. The Android app is at **252 / 252.0**. It includes the accepted backend, Web, and Android features delivered after v238.2.
 
 Main capabilities:
 
@@ -15,6 +15,7 @@ Main capabilities:
 - 1-day, 7-day, and 30-day model usage: requests, tokens, ring distribution, and two-series trends.
 - qBittorrent and Transmission downloaders, plus Mihomo, airport dashboard, and proxy settings.
 - WorkBuddy multi-egress accounts, dynamic remote servers, and optional tools.
+- Qoder primary and B account-pool cards, plus account-level model usage.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history (written in Chinese).
 
@@ -32,7 +33,7 @@ The former Models tab is now Usage. It shows models that received calls, request
 | --- | --- |
 | ![Web desktop usage](docs/screenshots/15-用量页-Web桌面-30天.png) | ![Web mobile usage](docs/screenshots/16-用量页-Web移动端-30天.png) |
 
-Screenshots keep the framing and dimensions of the v238-authorized assets and only have image metadata removed. This release adds no new visual authorization.
+This release uses user-reviewed usage-page screenshots with no sensitive information: Android 30-day, Android 30-day trend, Web desktop 30-day, and Web mobile 30-day. Files are copied at their original framing into `docs/screenshots/`; only EXIF/IPTC/XMP metadata was removed. No redraw or masking was applied to content the user approved for display. That approval is limited to this release and is not a permanent exemption.
 
 ## Screenshots
 
@@ -90,6 +91,8 @@ docker compose -f docker-compose.example.yml exec -T nas-monitor-api python3 -c 
 ```
 
 Open the entry point you chose and sign in with `WEB_API_TOKEN` or `APP_API_TOKEN`. Confirm the overview shows real Glances metrics. Static pages load anonymously; data endpoints require a Bearer token. The business port is 8765; the unauthenticated health probe is only on container loopback 8766.
+
+The usage page requires the New API data directory to be mounted read-only at `/new-api-data` in the container. Set `NEW_API_DATA_DIR` in `.env` to the actual directory; the template uses `/new-api-data/new-api.db`. Do not provide a single database file path or mount the database writable.
 
 If Glances runs in another container, `127.0.0.1` inside the monitor container refers to the monitor itself. Use the verified host LAN address or a shared Docker network service name. If no collector exists, the user decides whether to create one; never fabricate metrics.
 

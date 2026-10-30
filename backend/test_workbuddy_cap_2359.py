@@ -77,5 +77,117 @@ class CapBaselineCreditTests(unittest.TestCase):
                                                     {"u": {"remain": 999}}))
 
 
+class DailyCapRepairTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 10, 29, 11, 30, tzinfo=SHANGHAI)
+
+    def test_zero_baseline_is_repaired_from_current_positive_credit(self):
+        saved = {}
+        workbuddy = {"accounts": [{
+            "uid": "710cf934-7906-4cd7-822c-e3c6b09057cf",
+            "realm": "cn",
+            "credits": 2700,
+        }]}
+        today = "2026-10-29"
+        with patch.object(status, "_workbuddy_credit_cached", return_value=({}, None)), \
+             patch.object(status, "_load_cap_cutover", return_value={today: {
+                 "timezone": "Asia/Shanghai",
+                 "values": {
+                     "710cf934-7906-4cd7-822c-e3c6b09057cf": {
+                         "credits": 0,
+                         "captured_at": "2026-10-29T11:18:22+08:00",
+                         "source": "lazy",
+                     },
+                 },
+             }}), \
+             patch.object(status, "atomic_write_snapshot",
+                          side_effect=lambda _name, value, **_kwargs: saved.update(value)):
+            status._apply_wb_daily_cap(workbuddy, self.now)
+        account = workbuddy["accounts"][0]
+        self.assertEqual(2700, account["daily_cap"])
+        self.assertEqual("repair_current_credit", account["daily_cap_source"])
+        self.assertEqual(2700, saved[today]["values"]["710cf934-7906-4cd7-822c-e3c6b09057cf"]["credits"])
+
+    def test_zero_baseline_stays_zero_when_current_credit_is_zero(self):
+        workbuddy = {"accounts": [{
+            "uid": "u",
+            "realm": "cn",
+            "credits": 0,
+        }]}
+        with patch.object(status, "_workbuddy_credit_cached", return_value=({}, None)), \
+             patch.object(status, "_load_cap_cutover", return_value={"2026-10-29": {
+                 "timezone": "Asia/Shanghai",
+                 "values": {"u": {"credits": 0, "source": "lazy"}},
+             }}), \
+             patch.object(status, "atomic_write_snapshot"):
+            status._apply_wb_daily_cap(workbuddy, self.now)
+        self.assertEqual(0, workbuddy["accounts"][0]["daily_cap"])
+
+    def test_new_account_without_credit_does_not_persist_zero_baseline(self):
+        saved = {}
+        account = {
+            "uid": "new-account",
+            "realm": "cn",
+            "credits": 0,
+            "group_id": "wan3",
+        }
+        workbuddy = {"accounts": [account]}
+        today = "2026-10-29"
+        with patch.object(status, "_workbuddy_credit_cached", return_value=({}, None)), \
+             patch.object(status, "_load_cap_cutover", return_value={}), \
+             patch.object(status, "atomic_write_snapshot",
+                          side_effect=lambda _name, value, **_kwargs: saved.update(value)):
+            status._apply_wb_daily_cap(workbuddy, self.now)
+        self.assertIsNone(account["daily_cap"])
+        self.assertEqual("awaiting_credit", account["daily_cap_source"])
+        self.assertNotIn("new-account", saved.get(today, {}).get("values", {}))
+
+    def test_new_account_with_panel_credit_gets_cap_on_first_collection(self):
+        account = {
+            "uid": "new-account",
+            "realm": "cn",
+            "credits": 2300,
+            "credit_source": "panel_credits",
+        }
+        workbuddy = {"accounts": [account]}
+        with patch.object(status, "_workbuddy_credit_cached", return_value=({}, None)), \
+             patch.object(status, "_load_cap_cutover", return_value={}), \
+             patch.object(status, "atomic_write_snapshot"):
+            status._apply_wb_daily_cap(workbuddy, self.now)
+        self.assertEqual(2300, account["daily_cap"])
+        self.assertEqual("lazy", account["daily_cap_source"])
+
+
+class TodayCreditsTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 10, 22, 9, 30, tzinfo=SHANGHAI)
+
+    def test_today_credits_use_used_difference(self):
+        with patch.object(status, "_load_shadow_json", return_value={"2026-10-22": {"wb:u": {
+                "used": 100, "captured_at": "2026-10-22T00:01:00+08:00"}}}), \
+             patch.object(status, "_save_shadow_json"):
+            self.assertEqual((25, True), status._today_used(125, "wb:u", self.now))
+
+    def test_period_reset_rebaselines_without_reporting_month_total(self):
+        saved = {}
+        with patch.object(status, "_load_shadow_json", return_value={"2026-10-22": {"wb:u": {
+                "used": 3606, "captured_at": "2026-10-22T00:01:00+08:00"}}}), \
+             patch.object(status, "_save_shadow_json", side_effect=lambda _name, value: saved.update(value)):
+            self.assertEqual((None, False), status._today_used(3113, "wb:u", self.now))
+        self.assertEqual(3113, saved["2026-10-22"]["wb:u"]["used"])
+
+    def test_first_sample_has_no_valid_daily_baseline(self):
+        saved = {}
+        with patch.object(status, "_load_shadow_json", return_value={}), \
+             patch.object(status, "_save_shadow_json", side_effect=lambda _name, value: saved.update(value)):
+            self.assertEqual((None, False), status._today_used(500, "wb:u", self.now))
+        self.assertEqual(500, saved["2026-10-22"]["wb:u"]["used"])
+
+    def test_legacy_zero_delta_is_not_treated_as_known_zero(self):
+        with patch.object(status, "_load_shadow_json", return_value={"2026-10-22": {"wb:u": 3113}}), \
+             patch.object(status, "_save_shadow_json"):
+            self.assertEqual((0, False), status._today_used(3113, "wb:u", self.now))
+
+
 if __name__ == "__main__":
     unittest.main()

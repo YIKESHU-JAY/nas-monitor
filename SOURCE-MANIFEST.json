@@ -46,8 +46,8 @@
   },
   {
     "path": "CHANGELOG.md",
-    "size": 7441,
-    "sha256": "f62184570cb2cd412bfd862b2cae21bcf23fa9e8eb56adb2b2c158e42d11cfbf"
+    "size": 10437,
+    "sha256": "0619b2a1d4e12623d07af7f2b6dc2b9e8c4fb905870f1066a38085070a299d7d"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -62,7 +62,7 @@
   {
     "path": "HADashboard/app/build.gradle.kts",
     "size": 3491,
-    "sha256": "258607e340a66df11947d5ec079e01de2c8389326c7feb6fb4789ef48faa51c2"
+    "sha256": "f651cd75701f807cd0789109f5a99951bfcb1c1d88f7075cd0d7dc8f2a86e021"
   },
   {
     "path": "HADashboard/app/src/main/AndroidManifest.xml",
@@ -111,8 +111,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/OverviewScreen.kt",
-    "size": 70392,
-    "sha256": "695edfa6165661de515ec5f15a7572a0cdf8f5409fcc4a723ed917767f48dfa8"
+    "size": 70600,
+    "sha256": "30246f536e42dcdeb897386fa279295bc4fbba6f810172739e9f710a5401af39"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/PreferenceHelper.kt",
@@ -156,8 +156,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/data/Models.kt",
-    "size": 25801,
-    "sha256": "797a1b4449c50c63d61ee3bddbe2bfe9dfa97f33de49d6a75eca5a5e2252ce06"
+    "size": 27916,
+    "sha256": "484e77d9a8c148626ed6e84e8ac8ad45514761930a33b36df6a9ae7edf5d1807"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/data/QbittorrentClient.kt",
@@ -181,8 +181,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/Colors.kt",
-    "size": 9604,
-    "sha256": "3ea31363cf691e61aafacd456fb136891a8f168cf80682ea929ea2e90caa2db3"
+    "size": 13050,
+    "sha256": "fa2c506d3bc5b5a50cc019f1de778c4888ee310a7080b2861bc22936d286d7f7"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/DetailScreens.kt",
@@ -201,8 +201,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/GatewayScreen.kt",
-    "size": 113827,
-    "sha256": "5b584ec7a3df987ca3f29e6a8f71096ea1b75c805c37f32f3cd6a995d30304a6"
+    "size": 157818,
+    "sha256": "2b7365648a1252b6d89af14f4db8830ca7270f11165b670ef677050d4bad2132"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/KnowledgeArchiveScreen.kt",
@@ -211,8 +211,8 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/LiquidGlass.kt",
-    "size": 8779,
-    "sha256": "6cdacc0115154a7dbc1ff65e8a35f0deaa8a07c16acc11cbff24d470e0ac099b"
+    "size": 10076,
+    "sha256": "6ab35b61123f12e6749750b860f265e175f16dc38b880dd072dea8d1600c8e39"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/LiquidOptics.kt",
@@ -266,18 +266,18 @@
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/ThemeBackdrop.kt",
-    "size": 8810,
-    "sha256": "7c64ebb92886b25f410674d35c6e2668a003ce78a232a5d8bd44afba052b58e4"
+    "size": 8914,
+    "sha256": "de0ac452b1e89a23ebd4d34c4c8b22d66c7cb9c67936cb9c2fe4b6a162657ee5"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/TrendsAndContainers.kt",
-    "size": 28021,
-    "sha256": "1f645ea46725e01959b990f33b549663105f52fa37d1dbc2d9f27fe6cf3092cf"
+    "size": 28025,
+    "sha256": "817c703f204f4b3adcb5e441e60ad004efad80adac19c6ee8e18eae808556eb7"
   },
   {
     "path": "HADashboard/app/src/main/java/io/github/nasmonitor/app/ui/UiComponents.kt",
-    "size": 13073,
-    "sha256": "05f513d761a0566e902c2ba72abfd826f51f83c29c495e8c856e9b2925a495b3"
+    "size": 13194,
+    "sha256": "3256bb717d52cbd2c3588fa7f8f03660e4c33ab10114966ba03cd7360ffd878a"
   },
   {
     "path": "HADashboard/app/src/main/res/drawable/ic_launcher_background.xml",
@@ -445,19 +445,24 @@
     "sha256": "5c60dfb1d85fd184e54462c8d8ea53beb58142ac92f049e1fd9e80c249fc77b0"
   },
   {
+    "path": "HADashboard/app/src/test/java/io/github/nasmonitor/app/ui/GatewayTabOrderTest.kt",
+    "size": 1943,
+    "sha256": "21b0b77b71443d5e3e22edcc2e621e0be7bb1f224919cb8753490bd5ff8fd5a3"
+  },
+  {
     "path": "HADashboard/app/src/test/java/io/github/nasmonitor/app/ui/LiquidOpticsTest.kt",
     "size": 1431,
     "sha256": "81f3aee309689bb5c15ca6fc02fa41c2d5c21daacc65445fd0936f596a1d7c1c"
   },
   {
     "path": "HADashboard/app/src/test/java/io/github/nasmonitor/app/ui/ReadableColorsTest.kt",
-    "size": 1480,
-    "sha256": "eaab751c54cfbf45af792827c98f1a9a45103c2d5815d5dc41e4560de40bc54e"
+    "size": 7670,
+    "sha256": "063ed2aa9556f571c42b0091a719ebc606fa25e5d0eacdb22eb09644e45c7342"
   },
   {
     "path": "HADashboard/app/src/test/java/io/github/nasmonitor/app/ui/UiAuditFixTest.kt",
-    "size": 3888,
-    "sha256": "8c7fa8b42f8fd17503c5760a9939c5ac5188d461041a4cef9da850e7fa304d24"
+    "size": 8032,
+    "sha256": "32d0281bafb926e0e668100211028dee5ff662bedc8200509fedf7075f68b8dd"
   },
   {
     "path": "HADashboard/build.gradle.kts",
@@ -506,13 +511,13 @@
   },
   {
     "path": "README.en.md",
-    "size": 7708,
-    "sha256": "d8781b05ea6b7c2e5ee09a1b40f141242ae88a004aa607b6e48ef9ed38091102"
+    "size": 8279,
+    "sha256": "3bd54960942d437c49f3c78039c41f9122c5ad9cc8aaab248671f89d82ccb009"
   },
   {
     "path": "README.md",
-    "size": 6884,
-    "sha256": "c48253e326b11c15a735d0e0b709b573cb14ab9585a9b79b6176cecfd108898f"
+    "size": 7443,
+    "sha256": "46c6ab9bca0538f4fd1a5914130c8091f58ee02db928364a7555371de2d07e41"
   },
   {
     "path": "backend/.dockerignore",
@@ -521,8 +526,8 @@
   },
   {
     "path": "backend/.env.example",
-    "size": 5170,
-    "sha256": "98880a6bd7a08f057c766f4b583b489da83c5bb1ee12d14e80e5e1d59fc45e34"
+    "size": 5570,
+    "sha256": "37a8968cea07e8a2de1e24f83c58ccf5120fdd44865d3130c2e0b530b0cbaf7b"
   },
   {
     "path": "backend/.gitignore",
@@ -541,8 +546,8 @@
   },
   {
     "path": "backend/api_server.py",
-    "size": 159147,
-    "sha256": "57f9e31738748517f26c1ffcf15ddcead3bf1a1bf747d10b2ea907dba52aaf6e"
+    "size": 160010,
+    "sha256": "5dc5a062b96a09bb1d76f08308c90069939aa0abdc054d0fe148f26d8838a9f1"
   },
   {
     "path": "backend/backend_scheduler.py",
@@ -581,13 +586,18 @@
   },
   {
     "path": "backend/collectors/pipio_usage.py",
-    "size": 8011,
-    "sha256": "4b04351894778952cbeb800ee9fbba39218979bee6ef12d03c224d4b20f719d5"
+    "size": 9467,
+    "sha256": "207eaf6ba592a83af72287045bd09771db37d00a0b482281ca9b220f5b52bbe7"
   },
   {
     "path": "backend/collectors/probe_state.py",
     "size": 8444,
     "sha256": "68346ae977c9bc6b9b001057305b5697fdae4b14cff32a806bde7b64aa24eb56"
+  },
+  {
+    "path": "backend/collectors/qoder_status.py",
+    "size": 7205,
+    "sha256": "6cd5301be2b449852817d7375426e744b2e5522eca897e6250afb9647a0f1887"
   },
   {
     "path": "backend/collectors/shadow_store.py",
@@ -596,8 +606,8 @@
   },
   {
     "path": "backend/collectors/speedtest.py",
-    "size": 10509,
-    "sha256": "ddad92edf9be3260d0fab486a5c5fd615fc872db6266696b1248d4dec1f3d153"
+    "size": 10503,
+    "sha256": "1a289223e8a3e39bc9e9e1c183627a39bdad3939e14a802877070d56310399ed"
   },
   {
     "path": "backend/collectors/status_store.py",
@@ -616,18 +626,13 @@
   },
   {
     "path": "backend/collectors/workbuddy_status.py",
-    "size": 40004,
-    "sha256": "493e24678800413b89bc429f959ffcbddb2e683aa67db5f6f6cc76a99c91e60e"
-  },
-  {
-    "path": "backend/docker-compose.yml",
-    "size": 4688,
-    "sha256": "d559fa34802d48e77e48b86039417c18f332ebedbcb81654a28a72db98b6c46b"
+    "size": 51424,
+    "sha256": "9888699eafbdb5a82cd520437a78a21e95169bc5b61f81aff70e67cdf0b8adcc"
   },
   {
     "path": "backend/gateway_api.py",
-    "size": 47454,
-    "sha256": "df66b642bcff525c58177cce7f6e03da4b17b154eec04f344a96717056be6ea4"
+    "size": 53663,
+    "sha256": "5be38c2f7bec6526efc8023540bc19747035460aa82e4e2d46c9cc9022f1d17e"
   },
   {
     "path": "backend/migrate_server_registry.py",
@@ -676,8 +681,8 @@
   },
   {
     "path": "backend/test_gateway_usage.py",
-    "size": 11662,
-    "sha256": "66a08d21b655e6a9a9e8dcb076035358ca5c634b56a3ab263bed421a3c2bd4ae"
+    "size": 18475,
+    "sha256": "ec408b6d7d171909726090ecca1b3ba881cf5898c154c928442996105dd7e7a8"
   },
   {
     "path": "backend/test_mihomo_api.py",
@@ -691,8 +696,18 @@
   },
   {
     "path": "backend/test_overview_cache.py",
-    "size": 8105,
-    "sha256": "dd8469e1ad08536e0809639a8439ca1c467cff7854998f1343d9b0359a889b63"
+    "size": 10164,
+    "sha256": "b727a4c2dd5c1f2a3e94d47c6aee1ac763e25e8a02aafb2948acc2a34333fa77"
+  },
+  {
+    "path": "backend/test_pipio_usage.py",
+    "size": 3719,
+    "sha256": "993d7eda95b558ebfa52448c2b75f3aac972ab51254daee4badec0705cbc391f"
+  },
+  {
+    "path": "backend/test_qoder_status.py",
+    "size": 10234,
+    "sha256": "f7f45d9438ae931a3008045e5053d6a394f0ff8a8ca73fce90cf58d2076b820f"
   },
   {
     "path": "backend/test_server_management.py",
@@ -706,18 +721,18 @@
   },
   {
     "path": "backend/test_workbuddy_cap_2359.py",
-    "size": 3593,
-    "sha256": "fd1156724d0d6b4f944b8e27033ef2ca6b37afc451b99bf97f600fbed82ed672"
+    "size": 9079,
+    "sha256": "41d873f4ce3ad08b0c15fa6a0740fb5afa3ec27ade9821330f85e4dcafd5c26d"
   },
   {
     "path": "backend/test_workbuddy_groups.py",
-    "size": 11554,
-    "sha256": "83dce603f636ea2ee59f31fd1234b9e28d64e3799906a306d3164b68d5582696"
+    "size": 16664,
+    "sha256": "6ab09e60dae797aa6bd1c354e1a7a3442807620f05fbbe4a9d216710af664901"
   },
   {
     "path": "backend/web/app.js",
-    "size": 145258,
-    "sha256": "06fc698bd77a60a17bb90493cac6fdf37a613948c9ff404a353b3cf0d5919259"
+    "size": 157314,
+    "sha256": "70f2f7746606c9bd582cfd9ced521139a2b7b129961631c75968bab118eedaf9"
   },
   {
     "path": "backend/web/bootstrap.html",
@@ -731,8 +746,8 @@
   },
   {
     "path": "backend/web/style.css",
-    "size": 52422,
-    "sha256": "d893f071d5ace26e58e6f39fce89a58bd7e278a0a2a913dc04ddec6250a30f1e"
+    "size": 56579,
+    "sha256": "fa753d030771c5ae6e0ba7a0f24b8ab51ff224d58fa4bbede94114f9996bd413"
   },
   {
     "path": "docker-compose.docker.yml",
@@ -741,8 +756,8 @@
   },
   {
     "path": "docker-compose.example.yml",
-    "size": 1645,
-    "sha256": "d7427ccf52775926fd5d5cbcdb4794ac5320e0c22b4eb914a629ded9321662c3"
+    "size": 1916,
+    "sha256": "28e6a2927dd0b0b46d56b8358488cef0d57ccf369ec9499eb12e32219416fb34"
   },
   {
     "path": "docs/AI接手指南.md",

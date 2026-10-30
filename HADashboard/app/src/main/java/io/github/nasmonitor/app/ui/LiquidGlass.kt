@@ -173,15 +173,45 @@ fun LiquidAwareCard(
     elevation: CardElevation = CardDefaults.cardElevation(),
     border: BorderStroke? = null,
     glassTint: Color = Color.White,
+    translucentSurface: Boolean? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val glass = isGlassTheme() && LocalGlassScene.current != null
+    val ordinaryCard = CardDefaults.cardColors(containerColor = CardWhite)
+    val useTranslucentSurface = resolveNonGlassTranslucency(
+        requestedIsOrdinaryCard = colors == ordinaryCard,
+        translucentSurface = translucentSurface
+    )
+    val renderedElevation = if (useTranslucentSurface) {
+        CardDefaults.cardElevation(defaultElevation = NON_GLASS_CARD_ELEVATION)
+    } else elevation
     Card(
         modifier = if (glass) modifier.liquidGlass(shape, tintColor = glassTint) else modifier,
         shape = shape,
-        colors = if (glass) CardDefaults.cardColors(containerColor = Color.Transparent, contentColor = Ink) else colors,
-        elevation = if (glass) CardDefaults.cardElevation(0.dp) else elevation,
+        colors = if (glass) CardDefaults.cardColors(containerColor = Color.Transparent, contentColor = Ink)
+        else if (useTranslucentSurface) CardDefaults.cardColors(containerColor = CardSurface, contentColor = Ink)
+        else colors,
+        elevation = if (glass) CardDefaults.cardElevation(0.dp) else renderedElevation,
         border = if (glass) null else border,
         content = content
     )
 }
+
+/**
+ * Non-glass card surface policy. CardColors does not expose its container
+ * color, so the caller's colors are compared with the ordinary CardWhite
+ * defaults. A null [translucentSurface] upgrades only that ordinary card;
+ * any explicit semantic CardColors stays untouched. true forces the
+ * translucent surface and false always preserves the requested colors.
+ */
+internal fun resolveNonGlassTranslucency(
+    requestedIsOrdinaryCard: Boolean,
+    translucentSurface: Boolean?
+): Boolean = when (translucentSurface) {
+    true -> true
+    false -> false
+    null -> requestedIsOrdinaryCard
+}
+
+/** Translucent ordinary cards must not add an elevation/tint layer. */
+internal val NON_GLASS_CARD_ELEVATION = 0.dp

@@ -87,6 +87,118 @@ class PanelCreditsTests(unittest.TestCase):
             status._panel_wan3_credits_cached()
         self.assertEqual(1, call.call_count)
 
+    def test_panel_today_credits_reads_usage_credit(self):
+        with patch.object(status, "_panel_json",
+                          return_value={"today_credit": 12.6}) as call:
+            self.assertEqual(13, status._panel_wan3_today_credits())
+        self.assertIn("/api/stats/summary", call.call_args.args[0])
+
+    def test_panel_today_credits_failure_returns_none(self):
+        with patch.object(status, "_panel_json", side_effect=OSError("unreachable")):
+            self.assertIsNone(status._panel_wan3_today_credits())
+
+    def test_panel_today_credits_are_grouped_by_account_uid(self):
+        def fake_panel(path, *_args, **_kwargs):
+            if path.startswith("/api/logs"):
+                return {
+                    "total": 3,
+                    "items": [
+                        {"account": "A(5f268566)", "credit": 1.5},
+                        {"account": "A(5f268566)", "credit": 2.5},
+                        {"account": "B(710cf934)", "credit": 0.25},
+                    ],
+                }
+            self.fail("unexpected panel path: " + path)
+
+        with patch.object(status, "_panel_json", side_effect=fake_panel):
+            values = status._panel_wan3_today_credits_by_account()
+        self.assertEqual({"5f268566": 4.0, "710cf934": 0.25}, values)
+
+    def test_panel_today_credits_grouping_reads_every_page(self):
+        calls = []
+
+        def fake_panel(path, *_args, **_kwargs):
+            calls.append(path)
+            if "page=1" in path:
+                return {
+                    "total": 201,
+                    "items": [{"account": "A(5f268566)", "credit": 1.0}]
+                    + [{"account": "A(5f268566)", "credit": 0.0}] * 199,
+                }
+            return {
+                "total": 201,
+                "items": [{"account": "B(710cf934)", "credit": 2.0}],
+            }
+
+        with patch.object(status, "_panel_json", side_effect=fake_panel):
+            values = status._panel_wan3_today_credits_by_account()
+        self.assertEqual({"5f268566": 1.0, "710cf934": 2.0}, values)
+        self.assertEqual(2, len(calls))
+
+    def test_panel_today_credits_do_not_allocate_unknown_accounts(self):
+        with patch.object(status, "_panel_json", return_value={
+            "total": 2,
+            "items": [
+                {"account": "", "credit": 4.0},
+                {"account": "A(5f268566)", "credit": 1.0},
+            ],
+        }):
+            values = status._panel_wan3_today_credits_by_account()
+        self.assertEqual({"5f268566": 1.0}, values)
+
+    def test_complete_today_logs_resolve_missing_account_to_zero(self):
+        with patch.object(status, "_panel_json", return_value={
+            "total": 1,
+            "items": [{"account": "A(5f268566)", "credit": 4.0}],
+        }):
+            result = status._panel_wan3_today_credits_for_uid(
+                "710cf934-7906-4cd7-822c-e3c6b09057cf")
+        self.assertEqual((0, True), result)
+
+    def test_incomplete_today_logs_keep_missing_account_unknown(self):
+        with patch.object(status, "_panel_json", return_value={
+            "total": 2,
+            "items": [{"account": "A(5f268566)", "credit": 4.0}],
+        }):
+            result = status._panel_wan3_today_credits_for_uid(
+                "710cf934-7906-4cd7-822c-e3c6b09057cf")
+        self.assertEqual((None, False), result)
+
+    def test_today_logs_failure_keeps_account_unknown(self):
+        with patch.object(status, "_panel_json", side_effect=OSError("unreachable")):
+            result = status._panel_wan3_today_credits_for_uid(
+                "710cf934-7906-4cd7-822c-e3c6b09057cf")
+        self.assertEqual((None, False), result)
+
+    def test_panel_account_change_invalidates_credit_and_today_caches(self):
+        with patch.object(status, "_PANEL_CREDIT_CACHE", {
+            "ts": 1.0, "value": {"u1": 100},
+        }), patch.object(status, "_PANEL_TODAY_CACHE", {
+            "ts": 1.0, "value": {"u1": 10.0},
+        }):
+            status._invalidate_panel_credit_caches()
+            self.assertIsNone(status._PANEL_CREDIT_CACHE["value"])
+            self.assertIsNone(status._PANEL_TODAY_CACHE["value"])
+            self.assertEqual(0.0, status._PANEL_CREDIT_CACHE["ts"])
+            self.assertEqual(0.0, status._PANEL_TODAY_CACHE["ts"])
+
+    def test_collection_refreshes_panel_credit_cache_instead_of_using_stale_value(self):
+        with patch.object(status, "_PANEL_CREDIT_CACHE", {
+            "ts": 1.0, "value": {"full-uid": 100},
+        }), patch.object(status, "_panel_wan3_credits",
+                          return_value={"full-uid": 2300}) as refresh:
+            value = status._panel_wan3_credits_fresh()
+            self.assertEqual({"full-uid": 2300}, value)
+            self.assertEqual({"full-uid": 2300}, status._PANEL_CREDIT_CACHE["value"])
+        refresh.assert_called_once_with()
+
+    def test_today_credit_uid8_prefix_matches_full_uid(self):
+        result = status._panel_today_credit_for_uid(
+            {"710cf934": 4.0, "5f268566": 2.0},
+            "710cf934-7906-4cd7-822c-e3c6b09057cf",
+        )
+        self.assertEqual(4.0, result)
+
     def test_panel_accounts_join_fingerprint(self):
         """远端面板账号参与指纹：在 remote-nas 侧加号也能触发重采。"""
         with patch.object(status, "_WORKBUDDY_AUTH_DIRS", ()), \

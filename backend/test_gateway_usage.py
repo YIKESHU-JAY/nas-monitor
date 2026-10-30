@@ -33,8 +33,14 @@ class GatewayUsageTests(unittest.TestCase):
         connection.execute(
             "CREATE TABLE logs (id INTEGER PRIMARY KEY, created_at INTEGER, type INTEGER, "
             "model_name TEXT, quota INTEGER, prompt_tokens INTEGER, "
-            "completion_tokens INTEGER, use_time INTEGER)"
+            "completion_tokens INTEGER, use_time INTEGER, user_id INTEGER, username TEXT)"
         )
+        connection.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, "
+            "created_at INTEGER, type INTEGER, model_name TEXT)"
+        )
+        connection.execute("INSERT INTO users (id, username, display_name) VALUES (1, 'root', 'Root User')")
+        connection.execute("INSERT INTO users (id, username, display_name) VALUES (2, 'huangtao', 'huangtao')")
         connection.commit()
         connection.close()
 
@@ -48,12 +54,14 @@ class GatewayUsageTests(unittest.TestCase):
         return int(datetime.datetime.now().astimezone().timestamp()) - 60
 
     def insert_log(self, created_at, model="model-a", log_type=2, quota=500000,
-                   prompt=10, completion=5, use_time=2):
+                   prompt=10, completion=5, use_time=2, user_id=None, username=None):
         connection = sqlite3.connect(self.db_path)
         connection.execute(
             "INSERT INTO logs (created_at, type, model_name, quota, prompt_tokens, "
-            "completion_tokens, use_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (created_at, log_type, model, quota, prompt, completion, use_time),
+            "completion_tokens, use_time, user_id, username) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (created_at, log_type, model, quota, prompt, completion, use_time,
+             user_id, username),
         )
         connection.commit()
         connection.close()
@@ -115,6 +123,21 @@ class GatewayUsageTests(unittest.TestCase):
         self.assertEqual(2, max(item["requests"] for item in daily))
         self.assertEqual({"busy", "quiet"}, {item["model"] for item in daily if item["date"] == "2026-10-20"})
 
+    def test_hourly_trend_covers_latest_twelve_hours_and_keeps_model_rows(self):
+        self.insert_log(self.timestamp(1, 23), model="yesterday")
+        self.insert_log(self.timestamp(0, 0), model="midnight")
+        self.insert_log(self.timestamp(0, 0), model="midnight")
+        self.insert_log(self.timestamp(0, 11), model="late_morning")
+        self.insert_log(self.timestamp(0, 13), model="future")
+        result = self.build()
+        hourly = result["hourly"]
+        self.assertEqual({"2026-10-20"}, {item["date"] for item in hourly})
+        self.assertEqual(1, sum(item["requests"] for item in hourly))
+        self.assertEqual(1, sum(item["requests"] for item in hourly if item["hour_start"] == "2026-10-20T11:00:00"))
+        self.assertEqual(1, sum(item["requests"] for item in hourly if item["hour"] == 11))
+        self.assertNotIn("future", {item["model"] for item in hourly})
+        self.assertIn("hourly_limit", result["coverage"])
+
     def test_sqlite_connection_is_uri_read_only(self):
         self.insert_log(self.timestamp(0), model="read-only")
         result = self.build()
@@ -158,7 +181,7 @@ class GatewayUsageTests(unittest.TestCase):
             self.assertTrue(gateway_api.wait_model_usage_refresh())
         fresh = gateway_api.model_usage()
         self.assertFalse(fresh["stale"])
-        self.assertEqual(1, query.count)
+        self.assertEqual(2, query.count)
 
     def test_database_failure_returns_last_success_as_stale(self):
         self.insert_log(self.current_timestamp(), model="survivor")
@@ -187,6 +210,96 @@ class GatewayUsageTests(unittest.TestCase):
             restored = gateway_api.model_usage()
         self.assertTrue(restored["stale"])
         self.assertEqual("persisted", restored["windows"]["1d"]["models"][0]["model"])
+
+    def test_account_windows_do_not_leak_across_boundaries(self):
+        self.insert_log(self.timestamp(0, 0), model="today", user_id=1, username="root")
+        self.insert_log(self.timestamp(1, 23), model="yesterday", user_id=2, username="huangtao")
+        self.insert_log(self.timestamp(6, 0), model="day-six", user_id=1, username="root")
+        self.insert_log(self.timestamp(7, 0), model="outside-seven", user_id=2, username="huangtao")
+        result = self.build()
+        one_day = {item["account_name"] for item in result["windows"]["1d"]["accounts"]}
+        seven_day = {item["account_name"] for item in result["windows"]["7d"]["accounts"]}
+        thirty_day = {item["account_name"] for item in result["windows"]["30d"]["accounts"]}
+        self.assertEqual({"root"}, one_day)
+        self.assertEqual({"root", "huangtao"}, seven_day)
+        self.assertEqual({"root", "huangtao"}, thirty_day)
+
+    def test_same_user_id_merges_and_uses_username_not_display_name(self):
+        self.insert_log(self.timestamp(0), model="a", user_id=1, username="root")
+        self.insert_log(self.timestamp(0), model="b", user_id=1, username="root")
+        self.insert_log(self.timestamp(0), model="a", user_id=2, username="huangtao")
+        accounts = self.build()["windows"]["1d"]["accounts"]
+        by_id = {item["account_id"]: item for item in accounts}
+        self.assertEqual(2, by_id["1"]["requests"])
+        self.assertEqual("root", by_id["1"]["account_name"])
+        self.assertNotEqual("Root User", by_id["1"]["account_name"])
+        self.assertEqual("huangtao", by_id["2"]["account_name"])
+
+    def test_empty_account_name_uses_unknown_label_without_key_or_model(self):
+        self.insert_log(self.timestamp(0), model="secret-model", user_id=None, username="")
+        self.insert_log(self.timestamp(0), model="secret-model", user_id=None, username="   ")
+        accounts = self.build()["windows"]["1d"]["accounts"]
+        self.assertEqual(1, len(accounts))
+        self.assertEqual("unknown", accounts[0]["account_id"])
+        self.assertEqual("未知账号", accounts[0]["account_name"])
+        self.assertNotIn("secret-model", accounts[0]["account_name"])
+        self.assertNotIn("token", accounts[0])
+
+    def test_account_totals_match_model_totals_per_window(self):
+        self.insert_log(self.timestamp(0), model="a", user_id=1, username="root", prompt=10, completion=5)
+        self.insert_log(self.timestamp(0), model="b", user_id=2, username="huangtao", prompt=20, completion=7)
+        self.insert_log(self.timestamp(2), model="a", user_id=1, username="root", prompt=30, completion=9)
+        result = self.build()
+        for window in ("1d", "7d", "30d"):
+            models = result["windows"][window]["models"]
+            accounts = result["windows"][window]["accounts"]
+            self.assertEqual(sum(item["requests"] for item in models),
+                             sum(item["requests"] for item in accounts), window)
+            self.assertEqual(sum(item["tokens"] for item in models),
+                             sum(item["tokens"] for item in accounts), window)
+
+    def test_missing_user_fields_fall_back_to_unknown_account(self):
+        self.insert_log(self.timestamp(0), model="a", user_id=None, username=None)
+        result = self.build()
+        # 无 user_id/username 的日志仍归入“未知账号”，不应丢失请求。
+        self.assertEqual(1, sum(item["requests"] for item in result["windows"]["1d"]["accounts"]))
+
+    def test_no_usage_logs_returns_empty_account_lists(self):
+        result = self.build()
+        for window in ("1d", "7d", "30d"):
+            self.assertEqual([], result["windows"][window]["accounts"])
+
+    def test_legacy_snapshot_without_accounts_is_rebuilt(self):
+        self.insert_log(self.current_timestamp(), model="legacy", user_id=1, username="root")
+        with open(self.snapshot_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "saved_wall_at": time.time(),
+                "snapshot": {
+                    "windows": {
+                        "1d": {"models": [], "label": "最近 1 天"},
+                        "7d": {"models": [], "label": "最近 7 天"},
+                        "30d": {"models": [], "label": "最近 30 天"},
+                    },
+                    "daily": [], "hourly": [], "source": "sqlite", "stale": False,
+                },
+            }, handle)
+        gateway_api.reset_model_usage_cache()
+        result = gateway_api.model_usage()
+        self.assertEqual(["root"], [item["account_name"] for item in result["windows"]["1d"]["accounts"]])
+
+    def test_new_user_is_included_dynamically_in_all_windows(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            "INSERT INTO users (id, username, display_name) VALUES (3, 'newuser', 'New User Display')"
+        )
+        connection.commit()
+        connection.close()
+        self.insert_log(self.timestamp(0), model="model-new", user_id=3, username="newuser")
+        result = self.build()
+        for window in ("1d", "7d", "30d"):
+            names = {item["account_name"] for item in result["windows"][window]["accounts"]}
+            self.assertIn("newuser", names, window)
+            self.assertNotIn("New User Display", names, window)
 
 
 class MockWithEvents:
